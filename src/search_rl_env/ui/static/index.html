@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Search Lab — тестирование агента</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='9' fill='%232e4944'/%3E%3Cpath d='M9 11h14M9 16h10M9 21h6' stroke='%23e7f1db' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/assets/app.css">
+  <script src="/assets/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Search Lab, главная">
+      <span class="brand-icon" aria-hidden="true"><i></i><i></i><i></i></span>
+      <span>Search Lab<span class="brand-divider">/</span><span class="brand-section">Agent playground</span></span>
+    </a>
+    <span class="local-badge"><span class="dot"></span>Локальная среда</span>
+  </header>
+
+  <main class="workspace">
+    <div class="page-heading">
+      <div><p class="eyebrow">SEARCH RL ENV</p><h1>Проверим агента в деле<span class="heading-dot">.</span></h1>
+        <p class="subtitle">Задайте вопрос и проследите путь от запроса до выбранных документов.</p></div>
+      <div class="environment-tags"><span>Verifiers v1</span><span><span class="dot muted-dot"></span>Поиск на моках</span></div>
+    </div>
+
+    <div class="layout">
+      <section class="panel setup-panel" aria-labelledby="setup-heading">
+        <div class="panel-heading"><span class="section-number">01</span><h2 id="setup-heading">Новый эпизод</h2></div>
+        <form id="run-form">
+          <label for="question" class="field-label">Вопрос</label>
+          <textarea id="question" name="question" rows="4" required placeholder="Что агенту нужно найти?">Какие документы описывают перенос срока проекта?</textarea>
+
+          <fieldset class="mode-fieldset"><legend class="field-label">Модель</legend>
+            <div class="mode-switch">
+              <label class="mode-option"><input type="radio" name="mode" value="mock" checked><span><strong>Мок</strong><small>Проверка цикла</small></span><span class="radio-mark"></span></label>
+              <label class="mode-option"><input type="radio" name="mode" value="api"><span><strong>Модель API</strong><small>Реальные решения</small></span><span class="radio-mark"></span></label>
+            </div>
+          </fieldset>
+
+          <div id="api-fields" hidden>
+            <label for="model-id" class="field-label">Model ID</label>
+            <input id="model-id" type="text" placeholder="qwen/qwen3.5-9b" autocomplete="off">
+            <p class="field-hint">Доступ к модели — из локального .env.</p>
+            <p id="api-note" class="configuration-note" hidden></p>
+          </div>
+          <p id="mode-hint" class="mode-hint">Мок выполняет search → finish. Usage условный.</p>
+
+          <details class="settings"><summary>Параметры запуска<span aria-hidden="true">＋</span></summary>
+            <div class="settings-grid">
+              <label>Токенов на ответ<input id="per-step" type="number" value="2048" min="1" required></label>
+              <label>Таймаут запроса, с<input id="timeout" type="number" value="60" min="0.1" step="0.1" required></label>
+              <label>Максимум шагов<input id="max-steps" type="number" min="1" placeholder="Без ограничения"></label>
+              <label>Общий бюджет токенов<input id="max-tokens" type="number" min="1" placeholder="Без ограничения"></label>
+            </div>
+            <p class="field-hint">Бюджет токенов проверяется между ходами.</p>
+          </details>
+
+          <div id="form-error" class="error-message" role="alert" hidden></div>
+          <div class="run-actions">
+            <button id="start-button" class="button primary" type="submit"><span aria-hidden="true">▶</span>Запустить эпизод<span class="shortcut" aria-hidden="true">⌘ ↵</span></button>
+            <button id="stop-button" class="button stop" type="button" hidden><span aria-hidden="true">■</span>Остановить</button>
+          </div>
+        </form>
+
+        <details class="corpus" open><summary><span>Тестовый корпус<span id="corpus-count" class="count">2</span></span><span class="chevron" aria-hidden="true">⌄</span></summary>
+          <p class="field-hint corpus-hint">Выдача фиксирована для любого запроса.</p><div id="corpus-documents"></div>
+        </details>
+      </section>
+
+      <section class="panel trajectory-panel" aria-labelledby="trajectory-heading">
+        <div class="panel-heading trajectory-heading"><div class="panel-title"><span class="section-number">02</span><h2 id="trajectory-heading">Траектория</h2></div><span id="status" class="status idle"><span class="dot"></span>Готов к запуску</span></div>
+        <div class="metrics" aria-label="Статистика эпизода">
+          <div><span class="metric-label">Шаги модели</span><strong id="steps-value">—</strong></div>
+          <div><span class="metric-label">Поиски</span><strong id="searches-value">—</strong></div>
+          <div><span class="metric-label">Выходные токены</span><strong id="tokens-value">—</strong></div>
+          <div><span class="metric-label">Время</span><strong id="time-value">00:00</strong></div>
+        </div>
+
+        <div id="empty-state" class="empty-state">
+          <div class="empty-flow" aria-hidden="true"><span>?</span><i></i><span class="search-symbol">⌕</span><i></i><span>✓</span></div>
+          <h3>Каждое действие на виду</h3><p>Здесь появятся запросы модели, результаты поиска<br>и финальный выбор документов.</p>
+          <span class="empty-caption">ВОПРОС<span>→</span>ПОИСК<span>→</span>РЕЗУЛЬТАТ</span>
+        </div>
+        <div id="activity" class="activity" role="log" aria-label="Действия агента" aria-live="polite" hidden></div>
+        <div id="waiting" class="waiting" hidden><span class="spinner" aria-hidden="true"></span><span id="waiting-label">Запускаем среду…</span><span id="waiting-time"></span></div>
+
+        <section id="result-section" class="result-section" aria-labelledby="result-heading" hidden>
+          <div class="result-heading"><h3 id="result-heading">Выбранные документы</h3><span id="result-count" class="count"></span></div>
+          <div id="result-documents"></div><p id="result-error" class="error-message" hidden></p>
+        </section>
+        <footer id="result-footer" class="result-footer" hidden>
+          <div><span id="save-label" class="saved-label">Результат сохранён</span><code id="saved-path"></code><span id="cost-label" class="cost-label"></span></div>
+          <a id="download" class="button secondary" href="#" download>Скачать JSON <span aria-hidden="true">↓</span></a>
+        </footer>
+        <details id="json-section" class="json-section" hidden><summary>Полный результат эпизода<span aria-hidden="true">{ }</span></summary><pre id="result-json"></pre></details>
+      </section>
+    </div>
+    <footer class="page-footer"><span>SEARCH LAB<span class="footer-dot">·</span>Ручная проверка харнесса</span><span>Один интерфейс для мока и модели</span></footer>
+  </main>
+</body>
+</html>
