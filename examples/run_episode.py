@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -9,18 +10,32 @@ from dotenv import load_dotenv
 from pydantic import TypeAdapter
 
 from search_rl_env.agent import run_episode, save_episode
-from search_rl_env.agent.client import OpenRouterClient
+from search_rl_env.agent.auth import load_api_key
+from search_rl_env.agent.client import ChatCompletionsClient, OpenRouterClient
 from search_rl_env.agent.mocks import MockModel, MockSearch
-from search_rl_env.contracts import AgentTask, EpisodeConfig, SearchHit
+from search_rl_env.contracts import AgentTask, EpisodeConfig, EpisodeResult, SearchHit
 from search_rl_env.contracts.types import StopReason
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 
 
+def print_trajectory(result: EpisodeResult) -> None:
+    for step in result.trajectory:
+        print(f"\nШаг {step.step}: модель={step.model}; выходных токенов={step.usage.completion_tokens}")
+        for action in step.actions:
+            print(f"  {action.name}({action.arguments})")
+            print(f"  → {json.dumps(action.result, ensure_ascii=False)}")
+        if step.error:
+            print(f"  Ошибка: {step.error.code}: {step.error.message}")
+    print(f"\nUsage: {result.usage.model_dump_json()}")
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model", choices=["mock", "openrouter"], default="mock")
-    parser.add_argument("--model-id", help="OpenRouter model id; также OPENROUTER_MODEL")
+    parser.add_argument("--model", choices=["mock", "api", "openrouter"], default="mock")
+    parser.add_argument("--model-id", help="Model id; также MODEL_ID или OPENROUTER_MODEL")
+    parser.add_argument("--question", help="Заменить вопрос в задаче своим текстом")
+    parser.add_argument("--verbose", action="store_true", help="Показать действия, выдачу и usage после эпизода")
     parser.add_argument("--task", type=Path, default=EXAMPLES_DIR / "fixtures/task.json")
     parser.add_argument("--hits", type=Path, default=EXAMPLES_DIR / "fixtures/search_hits.json")
     parser.add_argument("--output", type=Path, default=Path("runs/demo/episode.json"))
@@ -28,10 +43,12 @@ async def main() -> int:
     parser.add_argument("--max-searches", type=int, default=None, help="Необязательный отдельный лимит поисков")
     parser.add_argument("--max-output-tokens", type=int, default=2048)
     parser.add_argument("--max-tokens-per-step", type=int, default=512)
-    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--seed", type=int, default=None, help="Необязательный seed, если провайдер его поддерживает")
     args = parser.parse_args()
 
     task = AgentTask.model_validate_json(args.task.read_text(encoding="utf-8"))
+    if args.question is not None:
+        task = AgentTask.model_validate({**task.model_dump(), "question": args.question})
     hits = TypeAdapter(list[SearchHit]).validate_json(args.hits.read_text(encoding="utf-8"))
     search = MockSearch(hits, corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
     config = EpisodeConfig(
@@ -43,6 +60,18 @@ async def main() -> int:
     )
     if args.model == "mock":
         result = await run_episode(task, MockModel(), search, config)
+    elif args.model == "api":
+        load_dotenv(EXAMPLES_DIR.parent / ".env")
+        model_id = args.model_id or os.getenv("MODEL_ID", "")
+        endpoint = os.getenv("MODEL_API_URL", "")
+        if not model_id or not endpoint:
+            parser.error("Для API нужны MODEL_API_URL и --model-id или MODEL_ID.")
+        try:
+            api_key = load_api_key()
+        except ValueError as exc:
+            parser.error(str(exc))
+        async with ChatCompletionsClient(api_key=api_key, endpoint=endpoint, auth_scheme=os.getenv("MODEL_AUTH_SCHEME", "Bearer"), model=model_id) as model:
+            result = await run_episode(task, model, search, config)
     else:
         load_dotenv(EXAMPLES_DIR.parent / ".env")
         api_key = os.getenv("OPENROUTER_API_KEY", "")
@@ -53,6 +82,10 @@ async def main() -> int:
             result = await run_episode(task, model, search, config)
 
     path = save_episode(result, args.output)
+    if args.verbose:
+        print_trajectory(result)
+    if result.error:
+        print(f"error={result.error.code}: {result.error.message}")
     print(f"stop_reason={result.stop_reason.value}; documents={result.selected_document_ids}; result={path}")
     return 0 if result.stop_reason == StopReason.FINISHED else 1
 

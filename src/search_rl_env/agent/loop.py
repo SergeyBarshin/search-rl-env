@@ -20,6 +20,7 @@ from search_rl_env.contracts.types import (
     EpisodeError,
     EpisodeResult,
     EpisodeStep,
+    ModelError,
     SearchBackend,
     StopReason,
     ToolExecution,
@@ -74,7 +75,8 @@ async def run_episode(
             )
         except Exception as exc:
             state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
-            step.error = EpisodeError(code="model_error", message=f"Ошибка модели: {type(exc).__name__}.")
+            message = str(exc) if isinstance(exc, ModelError) else f"Ошибка модели: {type(exc).__name__}."
+            step.error = EpisodeError(code="model_error", message=message)
             state.error = step.error
             usage = usage.add(Usage())
             break

@@ -47,7 +47,7 @@ class EpisodeConfig(Contract):
     search_limit: int = Field(default=10, ge=1)
     max_snippet_chars: int = Field(default=2000, ge=1)
     max_documents: int = Field(default=10, ge=1)
-    seed: int | None = 0
+    seed: int | None = None
 
 
 class Usage(BaseModel):
@@ -74,6 +74,10 @@ class ModelResponse(Contract):
     response_id: str | None = None
     model: str | None = None
     provider: str | None = None
+
+
+class ModelError(RuntimeError):
+    """Безопасное для журнала сообщение об ошибке адаптера модели."""
 
 
 class ChatModel(Protocol):

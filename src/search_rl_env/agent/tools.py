@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from typing import Literal
 
-from pydantic import Field, TypeAdapter, ValidationError
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 
 from search_rl_env.contracts.types import (
     AgentTask,
@@ -30,6 +30,10 @@ class FunctionCall(Contract):
 
 
 class ToolCall(Contract):
+    # Например, OpenRouter может вернуть index и в нестриминговом ответе.
+    # Эти метаданные сохраняются в history, но не меняют проверку аргументов.
+    model_config = ConfigDict(extra="ignore", strict=True)
+
     id: str = Field(min_length=1)
     type: Literal["function"]
     function: FunctionCall
