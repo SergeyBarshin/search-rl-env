@@ -13,6 +13,9 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+dist/
+build/
+*.egg-info/
 
 # Datasets, indexes, models, and experiment outputs
 /data/
