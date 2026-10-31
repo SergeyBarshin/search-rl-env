@@ -1,0 +1,31 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Datasets, indexes, models, and experiment outputs
+data/
+indexes/
+models/
+checkpoints/
+runs/
+logs/
+mlflow/
+mlruns/
+*.db
+*.sqlite
+*.sqlite3
+
+# macOS
+.DS_Store
