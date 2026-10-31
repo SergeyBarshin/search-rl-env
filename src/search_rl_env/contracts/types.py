@@ -79,6 +79,12 @@ class ModelResponse(Contract):
 class ModelError(RuntimeError):
     """Безопасное для журнала сообщение об ошибке адаптера модели."""
 
+    code = "model_error"
+
+
+class ModelTimeoutError(ModelError):
+    code = "model_timeout"
+
 
 class ChatModel(Protocol):
     @property
@@ -127,6 +133,12 @@ class EpisodeStep(Contract):
     finish_reason: str | None = None
     actions: list[ToolExecution] = Field(default_factory=list)
     error: EpisodeError | None = None
+
+
+class EpisodeEvent(Contract):
+    kind: Literal["model_started", "model_finished", "tool_started", "tool_finished"]
+    step: int
+    details: dict[str, Any]
 
 
 class EpisodeResult(Contract):

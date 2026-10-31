@@ -1,11 +1,13 @@
 """Chat Completions через OpenRouter или api, без автоповторов запросов."""
 
+import asyncio
+import math
 from typing import Any
 
 import httpx
 from pydantic import ValidationError
 
-from search_rl_env.contracts.types import ModelError, ModelResponse, Usage
+from search_rl_env.contracts.types import ModelError, ModelResponse, ModelTimeoutError, Usage
 
 
 class ChatCompletionsClient:
@@ -23,12 +25,15 @@ class ChatCompletionsClient:
     ) -> None:
         if not api_key.strip() or not model.strip():
             raise ValueError("Нужны непустые api_key и model.")
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timeout_seconds должен быть конечным положительным числом.")
         self._api_key = api_key
         self._model = model
         self._endpoint = endpoint
         self._auth_scheme = auth_scheme
         self._adapter = adapter
         self._temperature = temperature
+        self._timeout_seconds = timeout_seconds
         self._owns_client = http_client is None
         self._http = http_client if http_client is not None else httpx.AsyncClient(timeout=timeout_seconds)
 
@@ -38,6 +43,7 @@ class ChatCompletionsClient:
             "adapter": self._adapter,
             "model": self._model,
             "temperature": self._temperature,
+            "timeout_seconds": self._timeout_seconds,
             "endpoint": self._endpoint,
             "provider": {"require_parameters": True},
         }
@@ -73,11 +79,14 @@ class ChatCompletionsClient:
         if seed is not None:
             payload["seed"] = seed
         try:
-            response = await self._http.post(
-                self._endpoint,
-                headers={"Authorization": f"{self._auth_scheme} {self._api_key}"},
-                json=payload,
-            )
+            async with asyncio.timeout(self._timeout_seconds):
+                response = await self._http.post(
+                    self._endpoint,
+                    headers={"Authorization": f"{self._auth_scheme} {self._api_key}"},
+                    json=payload,
+                )
+        except (TimeoutError, httpx.TimeoutException):
+            raise ModelTimeoutError(f"Таймаут запроса к модели (лимит {self._timeout_seconds:g} с).") from None
         except httpx.HTTPError:
             raise ModelError("Ошибка транспорта Chat Completions.") from None
         if not response.is_success:

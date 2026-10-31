@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import httpx
@@ -63,6 +64,29 @@ async def test_chat_completions_tool_protocol_without_network(client_type, crede
     assert result.model_metadata["adapter"] == adapter
     assert result.trajectory[0].usage.model_extra["completion_tokens_details"] == {"reasoning_tokens": 0}
     assert "fake-test-key" not in result.model_dump_json()
+
+
+async def test_total_request_deadline_stops_a_stalled_transport():
+    async def handler(request):
+        await asyncio.Event().wait()
+
+    task = AgentTask(task_id="test", question="Срок?", language="ru", corpus_id="demo")
+    search = MockSearch([], corpus_id="demo")
+    # MockTransport не применяет фазовые таймауты httpx; нужен общий deadline.
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None) as http:
+        model = ChatCompletionsClient(api_key="fake-test-key", endpoint="https://model.example.invalid/v1/chat/completions", model="qwen/test", timeout_seconds=0.02, http_client=http)
+        result = await asyncio.wait_for(run_episode(task, model, search, EpisodeConfig()), timeout=2)
+    assert result.stop_reason.value == "infrastructure_error"
+    assert result.error.code == "model_timeout"
+    assert "0.02" in result.error.message
+    assert result.usage.completion_tokens is None
+    assert result.model_metadata["timeout_seconds"] == 0.02
+
+
+@pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
+def test_request_timeout_must_be_positive_and_finite(seconds):
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        ChatCompletionsClient(api_key="fake-test-key", endpoint="https://model.example.invalid/v1/chat/completions", model="qwen/test", timeout_seconds=seconds)
 
 
 @pytest.mark.parametrize(("status", "body"), [

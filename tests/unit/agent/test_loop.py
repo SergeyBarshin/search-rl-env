@@ -287,3 +287,80 @@ async def test_runner_cancellation_propagates(task, search):
 
     with pytest.raises(asyncio.CancelledError):
         await run_episode(task, CancelledModel(), search, EpisodeConfig())
+
+
+async def test_progress_is_emitted_before_model_and_tool_execution(task, search):
+    events = []
+
+    class ObservedModel(MockModel):
+        async def complete(self, *args, **kwargs):
+            assert events[-1].kind == "model_started"
+            return await super().complete(*args, **kwargs)
+
+    await run_episode(task, ObservedModel(), search, EpisodeConfig(), on_event=events.append)
+    assert [event.kind for event in events] == [
+        "model_started", "model_finished", "tool_started", "tool_finished",
+        "model_started", "model_finished", "tool_started", "tool_finished",
+    ]
+    assert events[3].details["result"]["hits"][0]["doc_id"] == "doc-1"
+
+
+async def test_cancellation_preserves_completed_search_and_unknown_pending_usage(task, search):
+    waiting = asyncio.Event()
+    partial = []
+
+    class BlockedAfterSearch(MockModel):
+        async def complete(self, messages, **kwargs):
+            if any(message["role"] == "tool" for message in messages):
+                waiting.set()
+                await asyncio.Event().wait()
+            return await super().complete(messages, **kwargs)
+
+    operation = asyncio.create_task(run_episode(
+        task, BlockedAfterSearch(), search, EpisodeConfig(), on_interrupted=partial.append,
+    ))
+    await asyncio.wait_for(waiting.wait(), timeout=2)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    result = partial[0]
+    assert result.error.code == "interrupted"
+    assert result.search_calls == 1
+    assert len(result.trajectory) == 2
+    assert result.trajectory[0].actions[0].result["ok"]
+    assert result.trajectory[0].usage.completion_tokens == 1
+    assert result.usage.completion_tokens is None
+    assert result.usage.cost is None
+
+
+async def test_cancellation_during_search_records_interrupted_tool(task):
+    waiting = asyncio.Event()
+    partial = []
+
+    class BlockedSearch:
+        async def search(self, *args, **kwargs):
+            waiting.set()
+            await asyncio.Event().wait()
+
+    operation = asyncio.create_task(run_episode(
+        task, MockModel(), BlockedSearch(), EpisodeConfig(), on_interrupted=partial.append,
+    ))
+    await asyncio.wait_for(waiting.wait(), timeout=2)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    result = partial[0]
+    assert result.error.code == "interrupted"
+    assert result.trajectory[0].actions[0].result["error"]["code"] == "interrupted"
+    assert json.loads(result.history[-1]["content"])["error"]["code"] == "interrupted"
+    assert result.usage.completion_tokens == 1
+
+
+async def test_runner_timeout_keeps_standard_asyncio_semantics(task, search):
+    class BlockedModel(MockModel):
+        async def complete(self, *args, **kwargs):
+            await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.01):
+            await run_episode(task, BlockedModel(), search, EpisodeConfig())

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +20,7 @@ from search_rl_env.contracts.types import (
     ChatModel,
     EpisodeConfig,
     EpisodeError,
+    EpisodeEvent,
     EpisodeResult,
     EpisodeStep,
     ModelError,
@@ -28,7 +31,7 @@ from search_rl_env.contracts.types import (
 )
 
 from .prompts import budget_message, initial_history
-from .tools import ToolCall, ToolState, execute_tool, invalid_action, tool_schemas
+from .tools import ToolCall, ToolState, execute_tool, invalid_action, tool_error, tool_schemas
 
 
 async def run_episode(
@@ -36,131 +39,174 @@ async def run_episode(
     model: ChatModel,
     search: SearchBackend,
     config: EpisodeConfig,
+    *,
+    on_event: Callable[[EpisodeEvent], None] | None = None,
+    on_interrupted: Callable[[EpisodeResult], None] | None = None,
 ) -> EpisodeResult:
     started_at = datetime.now(timezone.utc)
     started = perf_counter()
+    episode_id = str(uuid4())
     state = ToolState()
     history = initial_history(task)
     trajectory: list[EpisodeStep] = []
     usage = Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0, cost=0.0)
     call_ids: set[str] = set()
+    pending_model = False
+    pending_action: ToolCall | None = None
+    action_started = started
 
-    while state.stop_reason is None:
-        if len(trajectory) >= config.max_steps:
-            state.stop_reason = StopReason.MAX_STEPS
-            break
-        # Отсутствующий usage завершает эпизод ниже, поэтому здесь счётчик известен.
-        remaining_tokens = config.max_output_tokens - (usage.completion_tokens or 0)
-        if remaining_tokens <= 0:
-            state.stop_reason = StopReason.MAX_OUTPUT_TOKENS
-            break
-        history.append(budget_message(
-            config,
-            steps=len(trajectory),
-            searches=state.searches,
-            output_tokens=usage.completion_tokens or 0,
-        ))
-        step = EpisodeStep(
-            step=len(trajectory) + 1,
-            request_max_output_tokens=min(config.max_tokens_per_step, remaining_tokens),
+    def emit(kind: str, step: int, **details) -> None:
+        if on_event is not None:
+            on_event(EpisodeEvent(kind=kind, step=step, details=deepcopy(details)))
+
+    def snapshot() -> EpisodeResult:
+        return EpisodeResult(
+            task_id=task.task_id,
+            episode_id=episode_id,
+            task=task,
+            config=config,
+            model_metadata=deepcopy(model.metadata),
+            selected_document_ids=state.selected_ids,
+            stop_reason=state.stop_reason,
+            truncated=state.stop_reason in {
+                StopReason.MAX_STEPS, StopReason.MAX_SEARCHES, StopReason.MAX_OUTPUT_TOKENS,
+            },
+            history=history,
+            trajectory=trajectory,
+            usage=usage,
+            search_calls=state.searches,
+            invalid_actions=state.invalid_actions,
+            started_at=started_at,
+            duration_seconds=perf_counter() - started,
+            error=state.error,
         )
-        trajectory.append(step)
-        model_started = perf_counter()
-        try:
-            response = await model.complete(
-                deepcopy(history),
-                tools=tool_schemas(),
-                max_output_tokens=step.request_max_output_tokens,
-                seed=config.seed,
-            )
-        except Exception as exc:
-            state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
-            message = str(exc) if isinstance(exc, ModelError) else f"Ошибка модели: {type(exc).__name__}."
-            step.error = EpisodeError(code="model_error", message=message)
-            state.error = step.error
-            usage = usage.add(Usage())
-            break
-        finally:
-            step.model_duration_seconds = perf_counter() - model_started
 
-        step.usage = response.usage
-        step.response_id = response.response_id
-        step.model = response.model
-        step.provider = response.provider
-        step.finish_reason = response.finish_reason
-        usage = usage.add(response.usage)
-        history.append(deepcopy(response.message))
+    def record_action(call: ToolCall, result: dict) -> ToolExecution:
+        action = ToolExecution(
+            tool_call_id=call.id,
+            name=call.function.name,
+            arguments=call.function.arguments,
+            result=result,
+            duration_seconds=perf_counter() - action_started,
+        )
+        trajectory[-1].actions.append(action)
+        history.append({
+            "role": "tool",
+            "tool_call_id": call.id,
+            "content": json.dumps(result, ensure_ascii=False),
+        })
+        return action
 
-        if response.usage.completion_tokens is None:
-            state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
-            state.error = EpisodeError(code="missing_usage", message="Нет completion_tokens; бюджет неизвестен.")
-        elif response.finish_reason == "length" or response.usage.completion_tokens > step.request_max_output_tokens:
-            state.stop_reason = StopReason.MAX_OUTPUT_TOKENS
-        elif response.finish_reason == "error":
-            state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
-            state.error = EpisodeError(code="provider_error", message="Провайдер вернул finish_reason=error.")
-
-        try:
-            if response.message.get("role") != "assistant":
-                raise ValueError("Expected assistant message")
-            calls = TypeAdapter(list[ToolCall]).validate_python(
-                response.message.get("tool_calls") or [], strict=True
-            )
-            ids = [call.id for call in calls]
-            if len(ids) != len(set(ids)) or call_ids.intersection(ids):
-                raise ValueError("Repeated tool_call_id")
-        except (ValidationError, ValueError):
-            if state.stop_reason is None:
-                state.stop_reason = StopReason.INVALID_ACTION
-                state.error = EpisodeError(code="invalid_tool_calls", message="Нарушен формат tool_calls или id вызова.")
-                state.invalid_actions += 1
-            step.error = state.error
-            break
-
-        call_ids.update(ids)
-        if not calls and state.stop_reason is None:
-            error = invalid_action(state, config, "missing_tool_call", "Для действия нужны search или finish.")
-            step.error = EpisodeError(**error["error"])
-            history.append({"role": "user", "content": json.dumps(error, ensure_ascii=False)})
-
-        for call in calls:
-            action_started = perf_counter()
-            result = await execute_tool(call, task=task, search=search, config=config, state=state)
-            step.actions.append(ToolExecution(
-                tool_call_id=call.id,
-                name=call.function.name,
-                arguments=call.function.arguments,
-                result=result,
-                duration_seconds=perf_counter() - action_started,
+    try:
+        while state.stop_reason is None:
+            if len(trajectory) >= config.max_steps:
+                state.stop_reason = StopReason.MAX_STEPS
+                break
+            # Отсутствующий usage завершает эпизод ниже, поэтому здесь счётчик известен.
+            remaining_tokens = config.max_output_tokens - (usage.completion_tokens or 0)
+            if remaining_tokens <= 0:
+                state.stop_reason = StopReason.MAX_OUTPUT_TOKENS
+                break
+            history.append(budget_message(
+                config,
+                steps=len(trajectory),
+                searches=state.searches,
+                output_tokens=usage.completion_tokens or 0,
             ))
-            history.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": json.dumps(result, ensure_ascii=False),
-            })
-        if state.error is not None:
-            step.error = state.error
+            step = EpisodeStep(
+                step=len(trajectory) + 1,
+                request_max_output_tokens=min(config.max_tokens_per_step, remaining_tokens),
+            )
+            trajectory.append(step)
+            emit("model_started", step.step, max_output_tokens=step.request_max_output_tokens)
+            model_started = perf_counter()
+            pending_model = True
+            try:
+                response = await model.complete(
+                    deepcopy(history),
+                    tools=tool_schemas(),
+                    max_output_tokens=step.request_max_output_tokens,
+                    seed=config.seed,
+                )
+            except Exception as exc:
+                state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
+                message = str(exc) if isinstance(exc, ModelError) else f"Ошибка модели: {type(exc).__name__}."
+                code = exc.code if isinstance(exc, ModelError) else "model_error"
+                step.error = EpisodeError(code=code, message=message)
+                state.error = step.error
+                usage = usage.add(Usage())
+                pending_model = False
+                break
+            finally:
+                step.model_duration_seconds = perf_counter() - model_started
 
-    return EpisodeResult(
-        task_id=task.task_id,
-        episode_id=str(uuid4()),
-        task=task,
-        config=config,
-        model_metadata=deepcopy(model.metadata),
-        selected_document_ids=state.selected_ids,
-        stop_reason=state.stop_reason,
-        truncated=state.stop_reason in {
-            StopReason.MAX_STEPS, StopReason.MAX_SEARCHES, StopReason.MAX_OUTPUT_TOKENS,
-        },
-        history=history,
-        trajectory=trajectory,
-        usage=usage,
-        search_calls=state.searches,
-        invalid_actions=state.invalid_actions,
-        started_at=started_at,
-        duration_seconds=perf_counter() - started,
-        error=state.error,
-    )
+            step.usage = response.usage
+            step.response_id = response.response_id
+            step.model = response.model
+            step.provider = response.provider
+            step.finish_reason = response.finish_reason
+            usage = usage.add(response.usage)
+            pending_model = False
+            history.append(deepcopy(response.message))
+            emit("model_finished", step.step, model=response.model, usage=response.usage.model_dump(),
+                 duration_seconds=step.model_duration_seconds)
+
+            if response.usage.completion_tokens is None:
+                state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
+                state.error = EpisodeError(code="missing_usage", message="Нет completion_tokens; бюджет неизвестен.")
+            elif response.finish_reason == "length" or response.usage.completion_tokens > step.request_max_output_tokens:
+                state.stop_reason = StopReason.MAX_OUTPUT_TOKENS
+            elif response.finish_reason == "error":
+                state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
+                state.error = EpisodeError(code="provider_error", message="Провайдер вернул finish_reason=error.")
+
+            try:
+                if response.message.get("role") != "assistant":
+                    raise ValueError("Expected assistant message")
+                calls = TypeAdapter(list[ToolCall]).validate_python(
+                    response.message.get("tool_calls") or [], strict=True
+                )
+                ids = [call.id for call in calls]
+                if len(ids) != len(set(ids)) or call_ids.intersection(ids):
+                    raise ValueError("Repeated tool_call_id")
+            except (ValidationError, ValueError):
+                if state.stop_reason is None:
+                    state.stop_reason = StopReason.INVALID_ACTION
+                    state.error = EpisodeError(code="invalid_tool_calls", message="Нарушен формат tool_calls или id вызова.")
+                    state.invalid_actions += 1
+                step.error = state.error
+                break
+
+            call_ids.update(ids)
+            if not calls and state.stop_reason is None:
+                error = invalid_action(state, config, "missing_tool_call", "Для действия нужны search или finish.")
+                step.error = EpisodeError(**error["error"])
+                history.append({"role": "user", "content": json.dumps(error, ensure_ascii=False)})
+
+            for call in calls:
+                emit("tool_started", step.step, name=call.function.name, arguments=call.function.arguments)
+                action_started = perf_counter()
+                pending_action = call
+                result = await execute_tool(call, task=task, search=search, config=config, state=state)
+                action = record_action(call, result)
+                pending_action = None
+                emit("tool_finished", step.step, **action.model_dump())
+            if state.error is not None:
+                step.error = state.error
+    except asyncio.CancelledError:
+        state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
+        state.error = EpisodeError(code="interrupted", message="Эпизод отменён во время выполнения.")
+        if pending_model:
+            usage = usage.add(Usage())
+        if pending_action is not None:
+            record_action(pending_action, tool_error("interrupted", "Выполнение инструмента отменено."))
+        if trajectory:
+            trajectory[-1].error = state.error
+        if on_interrupted is not None:
+            on_interrupted(snapshot())
+        raise
+
+    return snapshot()
 
 
 def save_episode(result: EpisodeResult, path: str | Path) -> Path:
