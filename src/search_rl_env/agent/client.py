@@ -1,13 +1,16 @@
 """Клиенты Chat Completions с настраиваемым endpoint, без автоповторов."""
 
 import asyncio
+import json
 import math
+from time import perf_counter
 from typing import Any
 
 import httpx
 from pydantic import ValidationError
 
 from search_rl_env.contracts.types import ModelError, ModelResponse, ModelTimeoutError, Usage
+from search_rl_env.profiling import HttpRecorder
 
 
 class ChatCompletionsClient:
@@ -68,6 +71,7 @@ class ChatCompletionsClient:
         max_output_tokens: int,
         seed: int | None,
     ) -> ModelResponse:
+        profiler = HttpRecorder()
         payload = {
             "model": self._model,
             "messages": messages,
@@ -82,35 +86,60 @@ class ChatCompletionsClient:
         if seed is not None:
             payload["seed"] = seed
         try:
-            async with asyncio.timeout(self._timeout_seconds):
-                response = await self._http.post(
-                    self._endpoint,
-                    headers={"Authorization": f"{self._auth_scheme} {self._api_key}"},
-                    json=payload,
-                )
-        except (TimeoutError, httpx.TimeoutException):
-            raise ModelTimeoutError(f"Таймаут запроса к модели (лимит {self._timeout_seconds:g} с).") from None
-        except httpx.HTTPError:
-            raise ModelError("Ошибка транспорта Chat Completions.") from None
-        if not response.is_success:
-            raise ModelError(f"Chat Completions HTTP {response.status_code}.")
-        try:
-            data = response.json()
-            if data.get("error"):
-                raise ModelError("Chat Completions вернул ошибку API.")
-            choice = data["choices"][0]
-            if choice.get("error"):
-                raise ModelError("Провайдер Chat Completions вернул ошибку.")
-            return ModelResponse(
-                message=choice["message"],
-                usage=Usage.model_validate(data.get("usage") or {}),
-                finish_reason=choice.get("finish_reason"),
-                response_id=data.get("id"),
-                model=data.get("model"),
-                provider=data.get("provider"),
+            request = self._http.build_request(
+                'POST', self._endpoint,
+                headers={"Authorization": f"{self._auth_scheme} {self._api_key}"},
+                json=payload,
+                extensions={'trace': profiler.trace},
             )
-        except (ValueError, KeyError, IndexError, TypeError, AttributeError, ValidationError):
-            raise ModelError("Неверный формат ответа Chat Completions.") from None
+            profiler.data.request_bytes = len(request.content)
+            profiler.data.request_prepare_seconds = perf_counter() - profiler.started
+            profiler.notify('request', 'started')
+            try:
+                async with asyncio.timeout(self._timeout_seconds):
+                    response = await self._http.send(request, stream=True)
+                    try:
+                        profiler.headers(response)
+                        if not response.is_success:
+                            raise ModelError(f"Chat Completions HTTP {response.status_code}.")
+                        body_started = perf_counter()
+                        body = bytearray()
+                        try:
+                            async for chunk in response.aiter_bytes():
+                                profiler.body_chunk(len(chunk))
+                                body.extend(chunk)
+                        finally:
+                            profiler.data.body_read_seconds = perf_counter() - body_started
+                    finally:
+                        await response.aclose()
+            except (TimeoutError, httpx.TimeoutException):
+                raise ModelTimeoutError(f"Таймаут запроса к модели (лимит {self._timeout_seconds:g} с).") from None
+            except httpx.HTTPError:
+                raise ModelError("Ошибка транспорта Chat Completions.") from None
+            decode_started = perf_counter()
+            try:
+                data = json.loads(body)
+                if data.get("error"):
+                    raise ModelError("Chat Completions вернул ошибку API.")
+                choice = data["choices"][0]
+                if choice.get("error"):
+                    raise ModelError("Провайдер Chat Completions вернул ошибку.")
+                result = ModelResponse(
+                    message=choice["message"], usage=Usage.model_validate(data.get("usage") or {}),
+                    finish_reason=choice.get("finish_reason"), response_id=data.get("id"),
+                    model=data.get("model"), provider=data.get("provider"),
+                )
+            except (ValueError, KeyError, IndexError, TypeError, AttributeError, ValidationError):
+                raise ModelError("Неверный формат ответа Chat Completions.") from None
+            finally:
+                profiler.data.decode_seconds = perf_counter() - decode_started
+        except BaseException as exc:
+            cancelled = isinstance(exc, asyncio.CancelledError)
+            exc.http_profile = profiler.finish(error_code='interrupted' if cancelled else getattr(exc, 'code', 'model_error'),
+                                               cancelled=cancelled)
+            raise
+        result.http_profile = profiler.finish()
+        return result
 
 
 class OpenRouterClient(ChatCompletionsClient):

@@ -22,6 +22,8 @@ def test_mock_example_saves_finished_episode(tmp_path):
     assert "search(" in completed.stdout
     assert "finish(" in completed.stdout
     assert "Usage:" in completed.stdout
+    assert result['profile']['wall_seconds'] > 0
+    assert output.with_suffix('.events.jsonl').is_file()
 
 
 async def test_ctrl_c_saves_partial_episode_without_traceback(tmp_path):

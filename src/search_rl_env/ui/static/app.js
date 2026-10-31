@@ -27,6 +27,7 @@ function mode() { return document.querySelector('input[name="mode"]:checked').va
 function seconds(value) { return `${value.toFixed(1)} с`; }
 function clock(value) { return `${Math.floor(value / 60).toString().padStart(2, "0")}:${Math.floor(value % 60).toString().padStart(2, "0")}`; }
 function formatNumber(value) { return value == null ? "—" : new Intl.NumberFormat("ru-RU").format(value); }
+function timing(value) { return value == null ? 'нет данных' : value < 1 ? `${(value * 1000).toFixed(1)} мс` : `${value.toFixed(3)} с`; }
 
 function setStatus(text, kind) {
   $("status").className = `status ${kind}`;
@@ -97,9 +98,85 @@ function sqlTable(columns, rows, truncated = false) {
 
 function showToolCounts() { $('searches-value').textContent = `${searches} / ${sqlCalls}`; }
 
+function renderProfile(profile) {
+  if (!profile) return;
+  $('profile-section').hidden = false;
+  $('profile-total').textContent = timing(profile.wall_seconds);
+  $('profile-bar').replaceChildren();
+  $('profile-breakdown').replaceChildren();
+  const phases = [
+    ['setup_seconds', 'Запуск среды', 'setup'], ['model_seconds', 'Запросы модели', 'model'],
+    ['tools_seconds', 'Инструменты', 'tools'], ['finalize_seconds', 'Финализация', 'finalize'],
+    ['scoring_seconds', 'Оценка', 'scoring'], ['other_seconds', 'Обвязка и завершение', 'other'],
+  ];
+  for (const [key, label, color] of phases) {
+    const segment = element('span', `profile-segment ${color}`);
+    segment.style.width = `${Math.min(100, 100 * profile[key] / Math.max(profile.wall_seconds, 0.000001))}%`;
+    segment.title = `${label}: ${timing(profile[key])}`;
+    $('profile-bar').append(segment);
+    const item = element('div', 'profile-value');
+    item.append(element('span', `profile-key ${color}`, label), element('strong', '', timing(profile[key])));
+    $('profile-breakdown').append(item);
+  }
+}
+
+function renderHttp(entry, profile, live = false) {
+  if (!entry || !profile) return;
+  if (!live) { entry.latestHttp = profile; entry.httpAt = Date.now(); }
+  if (!entry.http) {
+    entry.http = element('details', 'http-profile');
+    entry.wrapper.append(entry.http);
+  }
+  entry.http.replaceChildren(element('summary', '', `HTTP-профиль · ${profile.status_code || 'ожидание ответа'} · ${timing(profile.duration_seconds)}`));
+  const values = element('div', 'http-values');
+  for (const [label, value] of [
+    ['Подготовка запроса', profile.request_prepare_seconds], ['До транспорта (HTTPX / пул)', profile.time_to_transport_seconds],
+    ['До заголовков', profile.time_to_headers_seconds], ['До первого байта тела', profile.time_to_first_body_byte_seconds],
+    ['Чтение тела', profile.body_read_seconds], ['Разбор JSON', profile.decode_seconds],
+  ]) {
+    const line = element('div');
+    line.append(element('span', '', label), element('strong', '', timing(value)));
+    values.append(line);
+  }
+  for (const phase of profile.phases) {
+    const line = element('div', 'http-phase');
+    line.append(element('code', '', phase.name), element('span', '', `${timing(phase.duration_seconds)} · ${phase.status}`));
+    values.append(line);
+  }
+  for (const [name, value] of Object.entries(profile.provider_timing_seconds || {})) {
+    const line = element('div', 'http-phase');
+    line.append(element('code', '', `Server-Timing: ${name}`), element('span', '', timing(value)));
+    values.append(line);
+  }
+  values.append(element('p', 'profile-note', `${profile.connection_reused === true ? 'Соединение переиспользовано' : profile.connection_reused === false ? 'Новое соединение' : 'Нет транспортных данных о соединении'} · отправлено ${formatNumber(profile.request_bytes)} Б · декодированное тело ${formatNumber(profile.response_bytes)} Б`));
+  values.append(element('code', 'request-id', `request_id: ${profile.request_id}${profile.provider_request_id ? ' · provider: ' + profile.provider_request_id : ''}`));
+  values.append(element('p', 'profile-note', 'Первый байт готового JSON — не TTFT. Очередь и генерация отдельно видны только если API сообщает Server-Timing.'));
+  entry.http.append(values);
+}
+
 function renderProgress(event) {
   const { kind, step, details } = event;
-  if (kind === "model_started") {
+  if (kind === 'episode_phase') {
+    const names = { boot: 'Запускаем runtime…', setup: 'Подготавливаем Verifiers и MCP…',
+      agent: 'Запускаем программу агента…', finalize: 'Завершаем эпизод…', scoring: 'Вычисляем оценку…' };
+    if (details.status === 'started') waitFor(names[details.phase] || details.phase);
+  } else if (kind === 'episode_finished') {
+    renderProfile(details.profile);
+  } else if (kind === 'model_progress') {
+    renderHttp(modelRows.get(step), details.http_profile);
+    if (details.status === 'started') {
+      const phase = details.phase.split('.').pop();
+      const names = { request: 'Готовим HTTP-запрос…', connect_tcp: 'Открываем TCP-соединение (включая DNS)…',
+        start_tls: 'Устанавливаем TLS…', send_request_headers: 'Отправляем заголовки…',
+        send_request_body: 'Отправляем запрос модели…', receive_response_headers: 'Ждём заголовки ответа API…',
+        receive_response_body: 'Читаем ответ API…', response_closed: 'Закрываем HTTP-ответ…' };
+      waitFor(names[phase] || `HTTP: ${phase}…`);
+    }
+    if (details.http_profile.status === 'failed' || details.http_profile.status === 'cancelled') {
+      const entry = modelRows.get(step);
+      if (entry) entry.wrapper.classList.add('problem');
+    }
+  } else if (kind === "model_started") {
     $("steps-value").textContent = step;
     modelRows.set(step, row(`Шаг ${step} · запрос к модели`, String(step), `max_tokens ${details.max_output_tokens}`));
     waitFor("Ожидаем ответ модели…");
@@ -108,7 +185,11 @@ function renderProgress(event) {
     if (entry) {
       entry.heading.textContent = `Шаг ${step} · модель ответила`;
       entry.metadata.textContent = seconds(details.duration_seconds);
-      entry.wrapper.append(element("p", "event-description", `${details.model || "Модель"} · ${formatNumber(details.usage.completion_tokens)} выходных токенов`));
+      const counts = [`${formatNumber(details.usage.prompt_tokens)} входных`, `${formatNumber(details.usage.completion_tokens)} выходных`];
+      if (details.usage.prompt_tokens_details?.cached_tokens != null) counts.push(`${formatNumber(details.usage.prompt_tokens_details.cached_tokens)} из кеша`);
+      if (details.usage.completion_tokens_details?.reasoning_tokens != null) counts.push(`${formatNumber(details.usage.completion_tokens_details.reasoning_tokens)} reasoning`);
+      entry.wrapper.append(element("p", "event-description", `${details.model || "Модель"} · ${counts.join(' · ')} токенов`));
+      renderHttp(entry, details.http_profile);
     }
     if (details.usage.completion_tokens != null) tokens += details.usage.completion_tokens;
     $("tokens-value").textContent = formatNumber(tokens);
@@ -129,7 +210,7 @@ function renderProgress(event) {
     const key = `${step}:${details.name}`;
     const entry = toolRows.get(key)?.shift() || row(details.name, "↗", "", "tool");
     const result = details.result;
-    entry.metadata.textContent = seconds(details.duration_seconds);
+    entry.metadata.textContent = timing(details.duration_seconds);
     if (result.ok === false) {
       entry.wrapper.classList.add("problem");
       entry.wrapper.append(element("p", "error-message", `${result.error?.code || "tool_error"}: ${result.error?.message || "Ошибка инструмента"}`));
@@ -162,6 +243,8 @@ function finish(data) {
   searches = result.search_calls; sqlCalls = result.sql_calls || 0; showToolCounts();
   $("tokens-value").textContent = formatNumber(result.usage.completion_tokens);
   $("time-value").textContent = clock(result.duration_seconds);
+  renderProfile(result.profile);
+  for (const step of result.trajectory) renderHttp(modelRows.get(step.step), step.http_profile);
   $("result-section").hidden = false;
   $("result-heading").textContent = cancelled ? "Эпизод остановлен" : result.truncated ? "Остановка по бюджету" : "Выбранные документы";
   $("result-count").textContent = result.selected_document_ids.length;
@@ -182,6 +265,8 @@ function finish(data) {
   $("save-label").textContent = cancelled ? "Частичный результат сохранён" : "Результат сохранён";
   $("saved-path").textContent = data.saved_to;
   $("download").href = data.download_url;
+  $('download-events').hidden = !data.events_url || Boolean(data.logging_error);
+  if (data.events_url) $('download-events').href = data.events_url;
   $("result-footer").hidden = false;
   $("json-section").hidden = false;
   $("result-json").textContent = JSON.stringify(result, null, 2);
@@ -214,7 +299,7 @@ function reset() {
   $("result-documents").replaceChildren();
   $('answer-values').replaceChildren();
   $('answer-section').hidden = true;
-  for (const id of ["empty-state", "result-section", "result-footer", "json-section", "form-error", "result-error"]) $(id).hidden = true;
+  for (const id of ["empty-state", "result-section", "result-footer", "json-section", "form-error", "result-error", 'profile-section', 'download-events']) $(id).hidden = true;
   $("json-section").open = false;
   $("activity").hidden = false;
   $("steps-value").textContent = "0";
@@ -240,6 +325,13 @@ $("run-form").addEventListener("submit", async (event) => {
   elapsedTimer = setInterval(() => {
     $("time-value").textContent = clock((Date.now() - startedAt) / 1000);
     $("waiting-time").textContent = `${Math.floor((Date.now() - waitingAt) / 1000)} с`;
+    for (const entry of modelRows.values()) {
+      const profile = entry.latestHttp;
+      if (profile?.status !== 'running') continue;
+      const elapsed = (Date.now() - entry.httpAt) / 1000;
+      renderHttp(entry, { ...profile, duration_seconds: profile.duration_seconds + elapsed,
+        phases: profile.phases.map((phase) => phase.status === 'running' ? { ...phase, duration_seconds: phase.duration_seconds + elapsed } : phase) }, true);
+    }
   }, 500);
   try {
     const data = await jsonRequest("/api/runs", body);

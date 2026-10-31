@@ -6,14 +6,17 @@ import argparse
 import asyncio
 import errno
 import json
+import logging
 import os
+import re
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
-from time import time
+from time import time, perf_counter
 from typing import Literal
 from uuid import uuid4
 
+import httpx
 from aiohttp import web
 from dotenv import load_dotenv
 from pydantic import Field, ValidationError, field_validator
@@ -26,6 +29,7 @@ from search_rl_env.environment.demo import HYBRID_HITS, HYBRID_QUESTION, hybrid_
 from search_rl_env.environment.sql import MockSql, ORDERS, ORDERS_SCHEMA
 from search_rl_env.contracts import AgentTask, EpisodeConfig, EpisodeResult, SearchHit
 from search_rl_env.contracts.types import Contract, EpisodeEvent
+from search_rl_env.profiling import EventLog, event_logger
 
 STATIC_DIR = Path(__file__).parent / "static"
 DEFAULT_QUESTION = "Какие документы описывают перенос срока проекта?"
@@ -63,9 +67,15 @@ class Run:
     task: asyncio.Task | None = None
     done: bool = False
     result: EpisodeResult | None = None
+    created: float = field(default_factory=perf_counter)
+    event_log: EventLog | None = None
+    finished: float | None = None
 
     def publish(self, kind: str, data: dict) -> None:
         self.events.append({"seq": len(self.events) + 1, "type": kind, "time": time(), "data": data})
+        if self.event_log is None:
+            self.event_log = EventLog(self.path.with_name('events.jsonl'), run_id=self.id)
+        self.event_log.write(kind, data, seq=len(self.events))
         self.changed.set()
 
     def progress(self, event: EpisodeEvent) -> None:
@@ -76,6 +86,7 @@ class Run:
 class Workbench:
     output_dir: Path
     runs: dict[str, Run] = field(default_factory=dict)
+    http: httpx.AsyncClient | None = None
 
     async def execute(self, run: Run) -> None:
         partial = None
@@ -84,7 +95,8 @@ class Workbench:
             nonlocal partial
             partial = result
 
-        run.publish("started", {"mode": run.request.mode})
+        run.publish("started", {"mode": run.request.mode, 'scenario': run.request.scenario,
+                                'queue_seconds': perf_counter() - run.created})
         try:
             async with AsyncExitStack() as stack:
                 if run.request.mode == "mock":
@@ -96,6 +108,7 @@ class Workbench:
                         model=run.request.model_id or os.getenv("MODEL_ID", ""),
                         auth_scheme=os.getenv("MODEL_AUTH_SCHEME", "Bearer"),
                         timeout_seconds=run.request.request_timeout,
+                        http_client=self.http,
                     ))
                 task = AgentTask(task_id="ui-" + run.id, question=run.request.question,
                                  language="ru", corpus_id="synthetic-demo", corpus_revision="v1")
@@ -116,11 +129,15 @@ class Workbench:
             if run.result is None:
                 run.publish("cancelled", {"message": "Запуск остановлен до начала эпизода."})
             else:
+                save_started = perf_counter()
                 save_episode(run.result, run.path)
+                run.publish('persisted', {'duration_seconds': perf_counter() - save_started})
                 run.publish("complete", {
                     "result": run.result.model_dump(mode="json"),
                     "download_url": f"/api/runs/{run.id}/result",
                     "saved_to": str(run.path),
+                    'events_url': f'/api/runs/{run.id}/events-log',
+                    'logging_error': run.event_log.error if run.event_log else None,
                 })
         except asyncio.CancelledError:
             run.publish("cancelled", {"message": "Запуск остановлен."})
@@ -129,6 +146,7 @@ class Workbench:
             run.publish("error", {"message": f"Не удалось выполнить запуск ({type(exc).__name__})."})
         finally:
             run.done = True
+            run.finished = perf_counter()
             run.changed.set()
 
 
@@ -200,6 +218,7 @@ async def start_run(request):
         if not run.done:
             run.publish("cancelled", {"message": "Запуск остановлен до начала эпизода."})
             run.done = True
+            run.finished = perf_counter()
             run.changed.set()
 
     run.task.add_done_callback(completed)
@@ -207,7 +226,29 @@ async def start_run(request):
 
 
 def get_run(request) -> Run:
-    run = request.app[WORKBENCH].runs.get(request.match_info["run_id"])
+    workbench = request.app[WORKBENCH]
+    run_id = request.match_info['run_id']
+    run = workbench.runs.get(run_id)
+    # Ссылки на сохранённый результат продолжают работать после обновления UI.
+    if run is None and re.fullmatch(r'[a-f0-9]{32}', run_id):
+        path = workbench.output_dir / run_id / 'episode.json'
+        if path.is_file():
+            try:
+                result = EpisodeResult.model_validate_json(path.read_text(encoding='utf-8'))
+            except (OSError, ValueError):
+                raise web.HTTPNotFound() from None
+            hybrid = (result.native_trace or {}).get('task', {}).get('data', {}).get('sql_schema') is not None
+            saved_request = RunRequest(question=result.task.question,
+                mode='mock' if result.model_metadata.get('adapter') == 'mock' else 'api',
+                scenario='sql_rag' if hybrid else 'retrieval')
+            run = Run(run_id, saved_request, path, done=True, result=result)
+            run.finished = perf_counter()
+            run.created = run.finished - result.duration_seconds
+            run.events = [{'seq': 1, 'type': 'complete', 'time': path.stat().st_mtime, 'data': {
+                'result': result.model_dump(mode='json'), 'download_url': f'/api/runs/{run_id}/result',
+                'saved_to': str(path), 'events_url': f'/api/runs/{run_id}/events-log' if path.with_name('events.jsonl').exists() else None,
+            }}]
+            workbench.runs[run_id] = run
     if run is None:
         raise web.HTTPNotFound()
     return run
@@ -254,12 +295,49 @@ async def download(request):
     })
 
 
+async def download_events(request):
+    run = get_run(request)
+    path = run.path.with_name('events.jsonl')
+    if not path.is_file():
+        raise web.HTTPNotFound()
+    return web.FileResponse(path, headers={
+        'Content-Type': 'application/x-ndjson',
+        'Content-Disposition': f'attachment; filename="events-{run.id[:8]}.jsonl"',
+    })
+
+
+async def run_statuses(request):
+    runs = request.app[WORKBENCH].runs.values()
+    statuses = []
+    for run in runs:
+        last = next((event['data'] for event in reversed(run.events) if event['type'] == 'progress'), {})
+        statuses.append({'id': run.id, 'done': run.done, 'mode': run.request.mode, 'scenario': run.request.scenario,
+         'elapsed_seconds': (run.finished or perf_counter()) - run.created,
+         'episode_seconds': run.result.duration_seconds if run.result else None,
+         'last_event': run.events[-1]['type'] if run.events else None,
+         'phase': last.get('details', {}).get('phase') or last.get('kind'),
+         'step': last.get('step'), 'episode_id': last.get('episode_id')})
+    return web.json_response({'runs': statuses})
+
+
 async def cleanup(app):
     tasks = [run.task for run in app[WORKBENCH].runs.values() if run.task is not None and not run.task.done()]
     for task in tasks:
         if not task.cancelling():
             task.cancel()
     await asyncio.gather(*tasks, return_exceptions=True)
+
+
+async def http_pool(app):
+    workbench = app[WORKBENCH]
+    # Полный deadline остаётся на каждом вызове модели; пул принадлежит UI,
+    # а обёртки ChatCompletionsClient не закрывают чужой клиент.
+    async with httpx.AsyncClient(timeout=None, limits=httpx.Limits(
+        max_connections=20, max_keepalive_connections=20, keepalive_expiry=300,
+    )) as client:
+        workbench.http = client
+        yield
+        workbench.http = None
 
 
 def create_app(*, output_dir: str | Path = "runs/ui") -> web.Application:
@@ -269,12 +347,15 @@ def create_app(*, output_dir: str | Path = "runs/ui") -> web.Application:
         web.get("/", index),
         web.get("/api/settings", settings),
         web.post("/api/runs", start_run),
+        web.get('/api/runs', run_statuses),
         web.get("/api/runs/{run_id}/events", events),
         web.post("/api/runs/{run_id}/cancel", cancel_run),
         web.get("/api/runs/{run_id}/result", download),
+        web.get('/api/runs/{run_id}/events-log', download_events),
         web.static("/assets", STATIC_DIR),
     ])
     app.on_shutdown.append(cleanup)
+    app.cleanup_ctx.append(http_pool)
     return app
 
 
@@ -285,6 +366,11 @@ def main() -> None:
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     args = parser.parse_args()
     load_dotenv(args.env_file)
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter('%(message)s'))
+    event_logger.addHandler(handler)
+    event_logger.setLevel(logging.INFO)
+    event_logger.propagate = False
     print("Search Lab · локальная проверка харнесса", flush=True)
     try:
         web.run_app(create_app(output_dir=args.output_dir), host="127.0.0.1", port=args.port)

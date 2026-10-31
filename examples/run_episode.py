@@ -21,6 +21,7 @@ from search_rl_env.environment.demo import HYBRID_HITS, hybrid_task
 from search_rl_env.environment.sql import MockSql
 from search_rl_env.contracts import AgentTask, EpisodeConfig, EpisodeResult, SearchHit
 from search_rl_env.contracts.types import EpisodeEvent, StopReason
+from search_rl_env.profiling import EventLog, format_profile
 
 EXAMPLES_DIR = Path(__file__).resolve().parent
 
@@ -47,6 +48,15 @@ class TerminalProgress:
         elif event.kind == "tool_finished":
             self.waiting_for = None
             print(f"  → {json.dumps(details['result'], ensure_ascii=False)}", flush=True)
+        elif event.kind == 'episode_phase' and details['status'] == 'started':
+            phase = {'boot': 'Запуск runtime', 'setup': 'Подготовка Verifiers и MCP',
+                     'agent': 'Запуск программы агента', 'finalize': 'Финализация', 'scoring': 'Оценка'}
+            print(f"  [+{event.elapsed_seconds or 0:.3f} с] {phase.get(details['phase'], details['phase'])}", flush=True)
+        elif event.kind == 'model_progress' and details['status'] == 'started':
+            phase = details['phase']
+            self.waiting_for = 'HTTP: ' + phase
+            self.waiting_since = perf_counter()
+            print(f"  [+{event.elapsed_seconds or 0:.3f} с] HTTP {phase}", flush=True)
 
     async def heartbeat(self) -> None:
         while True:
@@ -74,6 +84,7 @@ async def main() -> int:
     parser.add_argument("--task", type=Path, default=EXAMPLES_DIR / "fixtures/task.json")
     parser.add_argument("--hits", type=Path, default=EXAMPLES_DIR / "fixtures/search_hits.json")
     parser.add_argument("--output", type=Path, default=Path("runs/demo/episode.json"))
+    parser.add_argument('--event-log', type=Path, help='JSONL-журнал профилирования (по умолчанию рядом с --output)')
     parser.add_argument("--max-steps", type=int, default=None, help="Необязательный лимит ответов модели")
     parser.add_argument("--max-output-tokens", type=int, default=None, help="Необязательный суммарный бюджет генерации")
     parser.add_argument("--max-tokens-per-step", type=int, default=512)
@@ -95,6 +106,12 @@ async def main() -> int:
         seed=args.seed,
     )
     progress = TerminalProgress() if args.verbose else None
+    event_log = EventLog(args.event_log or args.output.with_suffix('.events.jsonl'))
+
+    def on_event(event):
+        event_log.write('progress', event.model_dump(mode='json'))
+        if progress is not None:
+            progress(event)
     interrupted = False
 
     async def execute_episode(model) -> EpisodeResult:
@@ -107,7 +124,7 @@ async def main() -> int:
 
         heartbeat = asyncio.create_task(progress.heartbeat()) if progress is not None else None
         try:
-            return await run_episode(task, model, search, config, on_event=progress, on_interrupted=remember_partial,
+            return await run_episode(task, model, search, config, on_event=on_event, on_interrupted=remember_partial,
                                      sql=MockSql() if args.scenario == 'sql_rag' else None)
         except asyncio.CancelledError:
             if partial is None:
@@ -156,6 +173,9 @@ async def main() -> int:
         print(f"\nПрервано. Частичная траектория сохранена: {path}", flush=True)
     if args.verbose:
         print(f"\nUsage: {result.usage.model_dump_json()}", flush=True)
+        print('\n' + format_profile(result.model_dump(mode='json')), flush=True)
+    if event_log.error:
+        print(f'Не удалось записать журнал событий: {event_log.error}', file=sys.stderr)
     if result.error:
         print(f"error={result.error.code}: {result.error.message}")
     print(f"stop_reason={result.stop_reason.value}; documents={result.selected_document_ids}; result={path}")

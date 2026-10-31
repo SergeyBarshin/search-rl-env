@@ -72,6 +72,8 @@ async def test_real_mock_episode_streams_and_saves_native_trace(ui):
     assert result["task"]["question"] == "Какой новый срок проекта?"
     assert result["selected_document_ids"] == ["doc-001", "doc-002"]
     assert result["native_trace"]["verifiers"]["version"] == "0.4.0"
+    assert result['profile']['setup_seconds'] > 0
+    assert result['profile']['wall_seconds'] == result['duration_seconds']
     assert Path(complete["data"]["saved_to"]).is_file()
     download = await ui.get(complete["data"]["download_url"])
     assert download.status == 200
@@ -79,6 +81,20 @@ async def test_real_mock_episode_streams_and_saves_native_trace(ui):
     assert EpisodeResult.model_validate_json(await download.text()).episode_id == result["episode_id"]
     replay = await read_events(ui, run_id, after=complete["seq"] - 1)
     assert replay == [complete]
+    log = await ui.get(complete['data']['events_url'])
+    assert log.status == 200
+    log_text = await log.text()
+    records = [json.loads(line) for line in log_text.splitlines()]
+    assert records[-1]['event'] == 'complete'
+    assert records[-1]['episode_id'] == result['episode_id']
+    assert 'Какой новый срок проекта?' not in log_text
+    assert any(record.get('kind') == 'episode_phase' for record in records)
+    status = await (await ui.get('/api/runs')).json()
+    assert status['runs'][0]['done']
+    ui.server.app[server.WORKBENCH].runs.clear()
+    recovered = await ui.get(complete['data']['download_url'])
+    assert recovered.status == 200
+    assert (await recovered.json())['episode_id'] == result['episode_id']
 
 
 async def test_api_mode_uses_configured_client_without_external_requests(ui, monkeypatch):
@@ -100,13 +116,18 @@ async def test_api_mode_uses_configured_client_without_external_requests(ui, mon
         })
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        monkeypatch.setattr(server, "ChatCompletionsClient", lambda **kwargs: ChatCompletionsClient(**kwargs, http_client=http))
+        monkeypatch.setattr(server, "ChatCompletionsClient", lambda **kwargs: ChatCompletionsClient(**{**kwargs, 'http_client': http}))
         events = await read_events(ui, await start(ui, mode="api", model_id="qwen/override"))
     result = events[-1]["data"]["result"]
     assert result["stop_reason"] == "finished"
     assert result["model_metadata"]["adapter"] == "chat-completions"
     assert len(requests) == 2
     assert "fake-ui-credential" not in json.dumps(events)
+    ui.server.app[server.WORKBENCH].runs.clear()
+    restored = await ui.get(events[-1]['data']['download_url'])
+    assert restored.status == 200
+    statuses = await (await ui.get('/api/runs')).json()
+    assert statuses['runs'][0]['mode'] == 'api'
 
 
 async def test_stopping_pending_model_saves_partial_result(ui, monkeypatch):
@@ -184,3 +205,39 @@ async def test_hybrid_scenario_returns_sql_rows_answer_and_sources(ui):
     assert result['sql_calls'] == 1
     assert result['stop_reason'] == 'finished'
     assert [event['data']['details']['name'] for event in events if event['type'] == 'progress' and event['data']['kind'] == 'tool_started'] == ['search', 'sql', 'finish']
+
+
+async def test_ui_api_episodes_reuse_the_application_http_pool(ui, monkeypatch):
+    from aiohttp import web
+
+    monkeypatch.setenv('MODEL_API_KEY', 'test-pool-credential')
+    monkeypatch.setenv('MODEL_ID', 'qwen/test')
+    shared = []
+    peers = []
+
+    async def provider(request):
+        peers.append(request.transport.get_extra_info('peername'))
+        body = await request.json()
+        reply = await MockModel().complete(body['messages'], tools=body['tools'], max_output_tokens=body['max_tokens'], seed=None)
+        return web.json_response({'model': 'qwen/test', 'choices': [
+            {'message': reply.message, 'finish_reason': reply.finish_reason}], 'usage': reply.usage.model_dump()})
+
+    def factory(**kwargs):
+        shared.append(kwargs['http_client'])
+        return ChatCompletionsClient(**kwargs)
+
+    provider_app = web.Application()
+    provider_app.router.add_post('/v1/chat/completions', provider)
+    async with TestServer(provider_app) as endpoint:
+        monkeypatch.setenv('MODEL_API_URL', str(endpoint.make_url('/v1/chat/completions')))
+        monkeypatch.setattr(server, 'ChatCompletionsClient', factory)
+        reused = []
+        for _ in range(2):
+            events = await read_events(ui, await start(ui, mode='api'))
+            result = events[-1]['data']['result']
+            assert result['stop_reason'] == 'finished'
+            reused.extend(step['http_profile']['connection_reused'] for step in result['trajectory'])
+        assert shared[0] is shared[1] is ui.server.app[server.WORKBENCH].http
+        assert not shared[0].is_closed
+        assert reused == [False, True, True, True]
+        assert len(peers) == 4 and len(set(peers)) == 1

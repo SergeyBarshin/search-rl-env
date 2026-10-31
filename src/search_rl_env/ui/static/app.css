@@ -1282,3 +1282,36 @@ select:focus-visible { outline:3px solid #dcebbf; }
 #answer-section h3 { font-size:12px; font-weight:600; margin:0 0 12px; color:#536d43; }
 #answer-values { display:flex; gap:7px; flex-wrap:wrap; }
 .answer-chip { padding:7px 10px; border:1px solid #cfdfc0; background:#edf5e4; color:#4c6b3d; border-radius:5px; font:12px var(--mono); }
+
+.profile-section { margin:20px 26px 4px; padding:16px; border:1px solid #dfe6d9; border-radius:8px; background:#f9fbf6; }
+.profile-heading { display:flex; justify-content:space-between; gap:12px; align-items:center; }
+.profile-heading h3 { font-size:12px; font-weight:600; margin:0; }
+.profile-heading>span { font:12px var(--mono); color:#526c44; }
+.profile-bar { display:flex; height:8px; width:100%; border-radius:3px; overflow:hidden; background:#e9eee2; margin:15px 0; }
+.profile-segment { display:block; height:100%; }
+.profile-segment.setup { background:#b0c49c; }
+.profile-segment.model { background:#4e725c; }
+.profile-segment.tools { background:#92b1ad; }
+.profile-segment.finalize { background:#b1a5bc; }
+.profile-segment.scoring { background:#cab486; }
+.profile-segment.other { background:#d1d7c9; }
+.profile-breakdown { display:grid; grid-template-columns:1fr 1fr; gap:9px 18px; }
+.profile-value { display:flex; justify-content:space-between; gap:10px; align-items:center; font-size:10px; }
+.profile-key { color:#6d7b61; }
+.profile-value strong { font:10px var(--mono); font-weight:450; white-space:nowrap; }
+.profile-note { font-size:10px; line-height:1.6; color:#7a8870; margin:12px 0 0; }
+.http-profile { margin-top:10px; border:1px solid #e2e8db; border-radius:6px; padding:0 12px; background:#fcfdf9; }
+.http-profile summary { padding:10px 0; font:10px var(--mono); color:#617c50; }
+.http-values { margin-bottom:12px; }
+.http-values>div { display:flex; justify-content:space-between; gap:10px; padding:4px 0; font-size:10px; color:#6d7b61; }
+.http-values strong { font:10px var(--mono); font-weight:500; white-space:nowrap; }
+.http-phase code { font-size:9px; overflow-wrap:anywhere; }
+.http-phase>span { font:9px var(--mono); text-align:right; }
+.request-id { display:block; font:9px/1.7 var(--mono); overflow-wrap:anywhere; margin-top:10px; color:#8b977e; }
+.download-actions { display:flex; gap:7px; flex-wrap:wrap; }
+@media(max-width:760px) {
+  .profile-section { margin-left:20px; margin-right:20px; padding:12px; }
+  .profile-breakdown { grid-template-columns:1fr; }
+  .http-values>div { flex-wrap:wrap; gap:4px; }
+  .download-actions { justify-content:flex-end; }
+}

@@ -266,11 +266,15 @@ async def test_progress_is_emitted_before_model_and_tool_execution(task, search)
             return await super().complete(*args, **kwargs)
 
     await run_episode(task, ObservedModel(), search, EpisodeConfig(), on_event=events.append)
-    assert [event.kind for event in events] == [
+    actions = [event for event in events if event.kind in {'model_started', 'model_finished', 'tool_started', 'tool_finished'}]
+    assert [event.kind for event in actions] == [
         "model_started", "model_finished", "tool_started", "tool_finished",
         "model_started", "model_finished", "tool_started", "tool_finished",
     ]
-    assert events[3].details["result"]["hits"][0]["doc_id"] == "doc-1"
+    assert actions[3].details["result"]["hits"][0]["doc_id"] == "doc-1"
+    assert events[0].kind == 'episode_started'
+    assert events[-1].kind == 'episode_finished'
+    assert all(event.episode_id for event in events)
 
 
 async def test_cancellation_preserves_completed_search_and_unknown_pending_usage(task, search):

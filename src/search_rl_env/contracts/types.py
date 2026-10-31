@@ -89,6 +89,47 @@ class Usage(BaseModel):
         return Usage(**totals)
 
 
+class HttpPhase(Contract):
+    name: str
+    offset_seconds: float = Field(ge=0)
+    duration_seconds: float = Field(ge=0)
+    status: Literal["running", "complete", "failed", "cancelled"]
+    error_type: str | None = None
+
+
+class HttpProfile(Contract):
+    request_id: str
+    duration_seconds: float = Field(ge=0)
+    status: Literal["running", "complete", "failed", "cancelled"] = "running"
+    time_to_headers_seconds: float | None = None
+    time_to_first_body_byte_seconds: float | None = None
+    request_prepare_seconds: float | None = None
+    time_to_transport_seconds: float | None = None
+    body_read_seconds: float | None = None
+    decode_seconds: float | None = None
+    status_code: int | None = None
+    http_version: str | None = None
+    connection_reused: bool | None = None
+    request_bytes: int | None = None
+    response_bytes: int = 0
+    provider_request_id: str | None = None
+    provider_timing_seconds: dict[str, float] = Field(default_factory=dict)
+    error_code: str | None = None
+    phases: list[HttpPhase] = Field(default_factory=list)
+
+
+class EpisodeProfile(Contract):
+    version: Literal['1'] = '1'
+    wall_seconds: float = Field(ge=0)
+    setup_seconds: float = Field(ge=0)
+    model_seconds: float = Field(ge=0)
+    tools_seconds: float = Field(ge=0)
+    finalize_seconds: float = Field(ge=0)
+    scoring_seconds: float = Field(ge=0)
+    other_seconds: float = Field(ge=0)
+    framework_seconds: dict[str, float] = Field(default_factory=dict)
+
+
 class ModelResponse(Contract):
     message: dict[str, Any]
     usage: Usage = Field(default_factory=Usage)
@@ -96,12 +137,14 @@ class ModelResponse(Contract):
     response_id: str | None = None
     model: str | None = None
     provider: str | None = None
+    http_profile: HttpProfile | None = None
 
 
 class ModelError(RuntimeError):
     """Безопасное для журнала сообщение об ошибке адаптера модели."""
 
     code = "model_error"
+    http_profile: HttpProfile | None = None
 
 
 class ModelTimeoutError(ModelError):
@@ -154,12 +197,17 @@ class EpisodeStep(Contract):
     finish_reason: str | None = None
     actions: list[ToolExecution] = Field(default_factory=list)
     error: EpisodeError | None = None
+    http_profile: HttpProfile | None = None
 
 
 class EpisodeEvent(Contract):
-    kind: Literal["model_started", "model_finished", "tool_started", "tool_finished"]
+    kind: Literal["model_started", "model_finished", "tool_started", "tool_finished",
+                  "episode_started", "episode_phase", "episode_finished", "model_progress"]
     step: int
     details: dict[str, Any]
+    episode_id: str | None = None
+    elapsed_seconds: float | None = None
+    timestamp: datetime | None = None
 
 
 class EpisodeResult(Contract):
@@ -184,3 +232,4 @@ class EpisodeResult(Contract):
     native_trace: dict[str, Any] | None = None
     answer: list[str] | None = None
     sql_calls: int = 0
+    profile: EpisodeProfile | None = None

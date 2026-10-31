@@ -10,6 +10,7 @@ from uuid import uuid4
 from aiohttp import web
 
 from search_rl_env.contracts.types import EpisodeError, EpisodeEvent, ModelError, Usage, SqlQueryError
+from search_rl_env.profiling import observe_http
 
 
 class BackendBridge:
@@ -66,30 +67,41 @@ class BackendBridge:
         step = len(self.records) + 1
         max_tokens = min(body.get('max_tokens') or self.config.max_tokens_per_step, self.config.max_tokens_per_step)
         record = {'messages': deepcopy(body['messages']), 'max_tokens': max_tokens,
-                  'response': None, 'duration': 0.0}
+                  'response': None, 'duration': 0.0, 'http_profile': None, 'started': perf_counter()}
         self.records.append(record)
         self.emit('model_started', step, max_output_tokens=max_tokens)
         started = perf_counter()
+
+        def http_progress(profile, phase, status):
+            record['http_profile'] = profile
+            self.emit('model_progress', step, phase=phase, status=status, http_profile=profile.model_dump(mode='json'))
+
         try:
-            response = await self.model.complete(body['messages'], tools=body.get('tools', []),
-                max_output_tokens=max_tokens, seed=self.config.seed)
+            with observe_http(http_progress):
+                response = await self.model.complete(body['messages'], tools=body.get('tools', []),
+                    max_output_tokens=max_tokens, seed=self.config.seed)
             record['response'] = response
+            record['http_profile'] = response.http_profile
             if response.usage.prompt_tokens is None or response.usage.completion_tokens is None:
                 self.error = EpisodeError(code='missing_usage', message='Нет токенной статистики ответа модели.')
                 return web.json_response({'error': {'message': self.error.message}}, status=502)
             if response.finish_reason == 'error':
                 self.error = EpisodeError(code='provider_error', message='Провайдер вернул ошибку генерации.')
                 return web.json_response({'error': {'message': self.error.message}}, status=502)
-        except asyncio.CancelledError:
+        except asyncio.CancelledError as exc:
+            record['http_profile'] = getattr(exc, 'http_profile', record['http_profile'])
             raise
         except Exception as exc:
+            record['http_profile'] = getattr(exc, 'http_profile', record['http_profile'])
             self.error = EpisodeError(code=exc.code if isinstance(exc, ModelError) else 'model_error',
                 message=str(exc) if isinstance(exc, ModelError) else f'Ошибка модели: {type(exc).__name__}.')
             return web.json_response({'error': {'message': self.error.message}}, status=504 if self.error.code == 'model_timeout' else 502)
         finally:
             record['duration'] = perf_counter() - started
         self.emit('model_finished', step, model=response.model, usage=response.usage.model_dump(),
-                  duration_seconds=record['duration'])
+                  duration_seconds=record['duration'],
+                  response_id=response.response_id,
+                  http_profile=record['http_profile'].model_dump(mode='json') if record['http_profile'] else None)
         message = deepcopy(response.message)
         if message.get('tool_calls'):
             for index, call in enumerate(message['tool_calls']):

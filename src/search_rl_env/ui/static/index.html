@@ -82,6 +82,12 @@
           <div><span class="metric-label">Выходные токены</span><strong id="tokens-value">—</strong></div>
           <div><span class="metric-label">Время</span><strong id="time-value">00:00</strong></div>
         </div>
+        <section id="profile-section" class="profile-section" aria-labelledby="profile-heading" hidden>
+          <div class="profile-heading"><h3 id="profile-heading">Профиль времени</h3><span id="profile-total"></span></div>
+          <div id="profile-bar" class="profile-bar" aria-hidden="true"></div>
+          <div id="profile-breakdown" class="profile-breakdown"></div>
+          <p class="profile-note">Время запросов модели включает сеть и ожидание API. Этапы HTTP доступны в шагах ниже.</p>
+        </section>
 
         <div id="empty-state" class="empty-state">
           <div class="empty-flow" aria-hidden="true"><span>?</span><i></i><span class="search-symbol">⌕</span><i></i><span>✓</span></div>
@@ -98,7 +104,8 @@
         </section>
         <footer id="result-footer" class="result-footer" hidden>
           <div><span id="save-label" class="saved-label">Результат сохранён</span><code id="saved-path"></code><span id="cost-label" class="cost-label"></span></div>
-          <a id="download" class="button secondary" href="#" download>Скачать JSON <span aria-hidden="true">↓</span></a>
+          <div class="download-actions"><a id="download-events" class="button secondary" href="#" download hidden>Лог JSONL ↓</a>
+          <a id="download" class="button secondary" href="#" download>Скачать JSON <span aria-hidden="true">↓</span></a></div>
         </footer>
         <details id="json-section" class="json-section" hidden><summary>Полный результат эпизода<span aria-hidden="true">{ }</span></summary><pre id="result-json"></pre></details>
       </section>
