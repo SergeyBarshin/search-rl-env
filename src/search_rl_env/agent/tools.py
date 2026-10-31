@@ -1,6 +1,5 @@
 """Схемы инструментов и проверка аргументов до обращения к бэкенду."""
 
-from dataclasses import dataclass, field
 from typing import Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
@@ -8,7 +7,6 @@ from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from search_rl_env.contracts.types import (
     AgentTask,
     Contract,
-    EpisodeConfig,
     EpisodeError,
     SearchBackend,
     SearchHit,
@@ -21,7 +19,7 @@ class SearchArguments(Contract):
 
 
 class FinishArguments(Contract):
-    document_ids: list[str] = Field(json_schema_extra={"uniqueItems": True})
+    document_ids: list[str]
 
 
 class FunctionCall(Contract):
@@ -56,25 +54,12 @@ def tool_schemas() -> list[dict]:
     ]
 
 
-@dataclass
-class ToolState:
-    discovered_ids: set[str] = field(default_factory=set)
-    selected_ids: list[str] = field(default_factory=list)
-    searches: int = 0
-    invalid_actions: int = 0
-    stop_reason: StopReason | None = None
-    error: EpisodeError | None = None
-
-
 def tool_error(code: str, message: str) -> dict:
     return {"ok": False, "error": {"code": code, "message": message}}
 
 
-def invalid_action(state: ToolState, config: EpisodeConfig, code: str, message: str) -> dict:
+def invalid_action(state, code: str, message: str) -> dict:
     state.invalid_actions += 1
-    if state.invalid_actions >= config.max_invalid_actions:
-        state.stop_reason = StopReason.INVALID_ACTION
-        state.error = EpisodeError(code=code, message=message)
     return tool_error(code, message)
 
 
@@ -83,38 +68,33 @@ async def execute_tool(
     *,
     task: AgentTask,
     search: SearchBackend,
-    config: EpisodeConfig,
-    state: ToolState,
+    config,
+    state,
 ) -> dict:
     if state.stop_reason is not None:
         return tool_error("episode_stopped", "Эпизод уже остановлен; действие не выполнено.")
 
     name, arguments = call.function.name, call.function.arguments
     if name not in {"search", "finish"}:
-        return invalid_action(state, config, "unknown_tool", "Доступны только search и finish.")
+        return invalid_action(state, "unknown_tool", "Доступны только search и finish.")
     try:
         if name == "search":
             parsed = SearchArguments.model_validate_json(arguments)
             if not parsed.query.strip():
-                return invalid_action(state, config, "invalid_arguments", "Запрос не может быть пустым.")
+                return invalid_action(state, "invalid_arguments", "Запрос не может быть пустым.")
         else:
             parsed = FinishArguments.model_validate_json(arguments)
     except ValidationError:
-        return invalid_action(state, config, "invalid_arguments", f"Аргументы {name} не соответствуют схеме.")
+        return invalid_action(state, "invalid_arguments", f"Аргументы {name} не соответствуют схеме.")
 
     if isinstance(parsed, FinishArguments):
         document_ids = list(dict.fromkeys(parsed.document_ids))
         if any(doc_id not in state.discovered_ids for doc_id in document_ids):
-            return invalid_action(state, config, "unknown_document", "В finish разрешены только показанные id.")
-        if len(document_ids) > config.max_documents:
-            return invalid_action(state, config, "too_many_documents", "Превышен лимит финального списка.")
+            return invalid_action(state, "unknown_document", "В finish разрешены только показанные id.")
         state.selected_ids = document_ids
         state.stop_reason = StopReason.FINISHED
         return {"ok": True, "document_ids": document_ids}
 
-    if config.max_searches is not None and state.searches >= config.max_searches:
-        state.stop_reason = StopReason.MAX_SEARCHES
-        return tool_error("search_budget_exhausted", "Поисковый бюджет исчерпан.")
     state.searches += 1
     try:
         raw_hits = await search.search(

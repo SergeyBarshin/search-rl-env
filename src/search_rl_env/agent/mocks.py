@@ -41,8 +41,7 @@ class MockModel:
             name, arguments = "search", {"query": task["question"]}
         else:
             hits = [hit for result in results for hit in result.get("hits", [])]
-            budget = json.loads(messages[-1]["content"])["remaining_budget"]
-            ids = list(dict.fromkeys(hit["doc_id"] for hit in hits))[: budget["max_documents"]]
+            ids = list(dict.fromkeys(hit["doc_id"] for hit in hits))
             name, arguments = "finish", {"document_ids": ids}
         return ModelResponse(
             message={

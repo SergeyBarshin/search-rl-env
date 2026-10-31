@@ -72,7 +72,7 @@ class ChatCompletionsClient:
             "model": self._model,
             "messages": messages,
             "tools": tools,
-            "tool_choice": "required",
+            "tool_choice": "auto",
             "max_tokens": max_output_tokens,
             "temperature": self._temperature,
             "stream": False,

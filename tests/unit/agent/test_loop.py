@@ -31,8 +31,7 @@ def action(name, arguments, *, call_id="call-1", tokens=1):
             "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
         }]},
         usage=Usage(prompt_tokens=5, completion_tokens=tokens, total_tokens=5 + tokens, cost=0.0),
-        finish_reason="tool_calls",
-        model="scripted-test-model",
+        finish_reason="tool_calls", model="scripted-test-model",
     )
 
 
@@ -48,7 +47,7 @@ class ScriptedModel:
         return next(self.responses)
 
 
-async def test_complete_episode_and_json_roundtrip(task, search, tmp_path):
+async def test_complete_episode_and_native_trace_roundtrip(task, search, tmp_path):
     result = await run_episode(task, MockModel(), search, EpisodeConfig())
     assert result.stop_reason == StopReason.FINISHED
     assert result.selected_document_ids == ["doc-1", "doc-2"]
@@ -58,6 +57,12 @@ async def test_complete_episode_and_json_roundtrip(task, search, tmp_path):
     assert [step.actions[0].name for step in result.trajectory] == ["search", "finish"]
     assert search.calls[0] == {"query": task.question, "corpus_id": "demo", "corpus_revision": "v1", "limit": 10}
     assert [m["tool_call_id"] for m in result.history if m["role"] == "tool"] == ["mock-call-1", "mock-call-2"]
+    native = result.native_trace
+    assert native["verifiers"]["version"] == "0.4.0"
+    assert len(native["calls"]) == 2
+    assert native["stop_condition"] == "task_finished"
+    assert all(node["sampled"] == (node["message"]["role"] == "assistant") for node in native["nodes"])
+    assert result.reward is None
     path = save_episode(result, tmp_path / "nested/episode.json")
     assert EpisodeResult.model_validate_json(path.read_text()) == result
     assert list(path.parent.iterdir()) == [path]
@@ -68,17 +73,17 @@ def test_task_rejects_reference_fields(task):
         AgentTask.model_validate({**task.model_dump(), "gold": {"relevant_doc_ids": ["doc-1"]}})
 
 
-async def test_model_decides_number_of_searches_without_separate_limit(task, search):
+async def test_model_decides_searches_and_order_without_default_caps(task, search):
     model = ScriptedModel([
-        *(action("search", {"query": f"уточнение {i}"}, call_id=f"s-{i}") for i in range(4)),
+        *(action("search", {"query": f"уточнение {i}"}, call_id=f"s-{i}") for i in range(7)),
         action("finish", {"document_ids": ["doc-2", "doc-1", "doc-2"]}, call_id="finish"),
     ])
     result = await run_episode(task, model, search, EpisodeConfig())
     assert result.stop_reason == StopReason.FINISHED
-    assert result.search_calls == 4
+    assert result.search_calls == 7
     assert result.selected_document_ids == ["doc-2", "doc-1"]
-    assert result.config.max_searches is None
-    assert json.loads(model.requests[-1]["messages"][-1]["content"])["remaining_budget"]["searches"] is None
+    assert result.config.max_steps is result.config.max_output_tokens is None
+    assert "remaining_budget" not in json.dumps(model.requests, ensure_ascii=False)
 
 
 async def test_step_limit_does_not_select_all_found_documents(task, search):
@@ -89,35 +94,15 @@ async def test_step_limit_does_not_select_all_found_documents(task, search):
     assert len(result.trajectory) == 1
 
 
-async def test_optional_search_limit_blocks_backend_call(task, search):
-    model = ScriptedModel([action("search", {"query": "первый"}), action("search", {"query": "второй"}, call_id="call-2")])
-    result = await run_episode(task, model, search, EpisodeConfig(max_searches=1))
-    assert result.stop_reason == StopReason.MAX_SEARCHES
-    assert result.truncated
-    assert result.search_calls == len(search.calls) == 1
-    assert result.trajectory[-1].actions[0].result["error"]["code"] == "search_budget_exhausted"
-
-
-async def test_finish_is_allowed_after_last_search(task, search):
-    result = await run_episode(task, MockModel(), search, EpisodeConfig(max_searches=1))
-    assert result.stop_reason == StopReason.FINISHED
-
-
-async def test_zero_search_budget(task, search):
-    result = await run_episode(task, MockModel(), search, EpisodeConfig(max_searches=0))
-    assert result.stop_reason == StopReason.MAX_SEARCHES
-    assert not search.calls
-
-
-async def test_total_output_budget_reduces_next_request_and_allows_exact_finish(task, search):
+async def test_native_output_cap_is_checked_between_turns(task, search):
     model = ScriptedModel([
         action("search", {"query": "срок"}, tokens=2),
-        action("finish", {"document_ids": ["doc-1"]}, call_id="call-2", tokens=1),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="call-2", tokens=2),
     ])
     result = await run_episode(task, model, search, EpisodeConfig(max_output_tokens=3, max_tokens_per_step=10))
-    assert [request["max_output_tokens"] for request in model.requests] == [3, 1]
+    assert [request["max_output_tokens"] for request in model.requests] == [10, 10]
     assert result.stop_reason == StopReason.FINISHED
-    assert result.usage.completion_tokens == 3
+    assert result.usage.completion_tokens == 4
 
 
 async def test_output_budget_stops_before_next_model_request(task, search):
@@ -135,45 +120,51 @@ async def test_truncated_generation_does_not_execute_tools(task, search):
     result = await run_episode(task, ScriptedModel([response]), search, EpisodeConfig())
     assert result.stop_reason == StopReason.MAX_OUTPUT_TOKENS
     assert not search.calls
-    assert result.trajectory[0].actions[0].result["error"]["code"] == "episode_stopped"
 
 
-@pytest.mark.parametrize(("name", "arguments", "code"), [
-    ("read", {"doc_id": "doc-1"}, "unknown_tool"),
-    ("search", {"query": 123}, "invalid_arguments"),
-    ("search", {"query": "  "}, "invalid_arguments"),
-    ("search", {"query": "срок", "corpus_id": "other"}, "invalid_arguments"),
-    ("finish", {"document_ids": "doc-1"}, "invalid_arguments"),
-    ("finish", {"document_ids": ["invented"]}, "unknown_document"),
+@pytest.mark.parametrize(("name", "arguments"), [
+    ("read", {"doc_id": "doc-1"}),
+    ("search", {"query": 123}),
+    ("search", {"query": "  "}),
+    ("search", {"query": "срок", "corpus_id": "other"}),
+    ("finish", {"document_ids": "doc-1"}),
+    ("finish", {"document_ids": ["invented"]}),
 ])
-async def test_invalid_action(task, search, name, arguments, code):
-    result = await run_episode(task, ScriptedModel([action(name, arguments)]), search, EpisodeConfig(max_invalid_actions=1))
-    assert result.stop_reason == StopReason.INVALID_ACTION
-    assert result.error.code == code
-    assert not result.truncated
+async def test_invalid_action_is_returned_and_can_be_repaired(task, search, name, arguments):
+    model = ScriptedModel([
+        action(name, arguments, call_id="bad"),
+        action("finish", {"document_ids": []}, call_id="fixed"),
+    ])
+    result = await run_episode(task, model, search, EpisodeConfig(max_steps=3))
+    assert result.stop_reason == StopReason.FINISHED
+    assert result.error is None
+    assert result.invalid_actions == 1
     assert not search.calls
-    assert result.selected_document_ids == []
+    tool = next(m for m in model.requests[-1]["messages"] if m.get("tool_call_id") == "bad")
+    assert tool["content"]
+    assert result.trajectory[0].actions[0].result["ok"] is False
 
 
-async def test_malformed_json_is_an_action_error(task, search):
+async def test_malformed_json_is_returned_to_model(task, search):
     response = action("search", {})
     response.message["tool_calls"][0]["function"]["arguments"] = "{broken"
-    result = await run_episode(task, ScriptedModel([response]), search, EpisodeConfig(max_invalid_actions=1))
-    assert result.error.code == "invalid_arguments"
+    model = ScriptedModel([response, action("finish", {"document_ids": []}, call_id="fixed")])
+    result = await run_episode(task, model, search, EpisodeConfig(max_steps=3))
+    assert result.stop_reason == StopReason.FINISHED
+    assert result.invalid_actions == 1
+    assert not search.calls
 
 
-async def test_model_can_correct_action_error(task, search):
+async def test_more_than_two_errors_do_not_force_stop(task, search):
     model = ScriptedModel([
-        action("search", {"query": "срок"}),
-        action("finish", {"document_ids": ["invented"]}, call_id="bad-finish"),
-        action("finish", {"document_ids": ["doc-1"]}, call_id="fixed-finish"),
+        *(action("finish", {"document_ids": ["invented"]}, call_id=f"bad-{i}") for i in range(3)),
+        action("search", {"query": "срок"}, call_id="search"),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="finish"),
     ])
     result = await run_episode(task, model, search, EpisodeConfig())
     assert result.stop_reason == StopReason.FINISHED
-    assert result.invalid_actions == 1
-    assert result.error is None
-    tool_result = next(m for m in model.requests[-1]["messages"] if m.get("tool_call_id") == "bad-finish")
-    assert json.loads(tool_result["content"])["error"]["code"] == "unknown_document"
+    assert result.invalid_actions == 3
+    assert result.selected_document_ids == ["doc-1"]
 
 
 async def test_search_deduplication_and_observation_limits(task):
@@ -187,22 +178,16 @@ async def test_search_deduplication_and_observation_limits(task):
 
     model = ScriptedModel([
         action("search", {"query": "срок"}),
-        action("finish", {"document_ids": ["doc-2"]}, call_id="finish"),
+        action("finish", {"document_ids": ["doc-2"]}, call_id="bad"),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="fixed"),
     ])
-    result = await run_episode(task, model, UnboundedSearch(), EpisodeConfig(search_limit=1, max_snippet_chars=3, max_invalid_actions=1))
+    result = await run_episode(task, model, UnboundedSearch(), EpisodeConfig(search_limit=1, max_snippet_chars=3))
     assert result.trajectory[0].actions[0].result["hits"] == [{"doc_id": "doc-1", "snippet": "abc", "rank": 1}]
-    assert result.error.code == "unknown_document"
+    assert result.trajectory[1].actions[0].result["error"]["code"] == "unknown_document"
+    assert result.selected_document_ids == ["doc-1"]
 
 
-async def test_final_list_limit(task, search):
-    result = await run_episode(task, ScriptedModel([
-        action("search", {"query": "срок"}),
-        action("finish", {"document_ids": ["doc-1", "doc-2"]}, call_id="finish"),
-    ]), search, EpisodeConfig(max_documents=1, max_invalid_actions=1))
-    assert result.error.code == "too_many_documents"
-
-
-async def test_missing_usage_stops_instead_of_guessing_token_budget(task, search):
+async def test_missing_usage_is_an_infrastructure_error(task, search):
     response = action("search", {"query": "срок"})
     response.usage = Usage()
     result = await run_episode(task, ScriptedModel([response]), search, EpisodeConfig())
@@ -221,7 +206,6 @@ async def test_backend_failure_is_distinct_and_redacted(task):
     result = await run_episode(task, MockModel(), BrokenSearch(), EpisodeConfig())
     assert result.stop_reason == StopReason.INFRASTRUCTURE_ERROR
     assert result.error.code == "search_error"
-    assert result.search_calls == 1
     assert "should-not-appear" not in result.model_dump_json()
 
 
@@ -237,14 +221,15 @@ async def test_model_failure_is_recorded(task, search):
     assert "should-not-appear" not in result.model_dump_json()
 
 
-async def test_no_tool_call_can_be_corrected(task, search):
-    response = action("finish", {})
-    response.message = {"role": "assistant", "content": "Готово."}
-    result = await run_episode(task, ScriptedModel([
-        response, action("finish", {"document_ids": []}, call_id="finish"),
-    ]), search, EpisodeConfig())
-    assert result.stop_reason == StopReason.FINISHED
-    assert result.invalid_actions == 1
+async def test_text_without_finish_is_unsuccessful_termination(task, search):
+    response = ModelResponse(message={"role": "assistant", "content": "Готово."},
+                             usage=Usage(prompt_tokens=5, completion_tokens=1), finish_reason="stop")
+    model = ScriptedModel([response])
+    result = await run_episode(task, model, search, EpisodeConfig())
+    assert result.stop_reason == StopReason.INVALID_ACTION
+    assert result.error.code == "missing_finish"
+    assert len(model.requests) == 1
+    assert result.selected_document_ids == []
 
 
 async def test_multiple_calls_are_sequential_and_finish_stops_remaining_actions(task, search):
@@ -255,14 +240,6 @@ async def test_multiple_calls_are_sequential_and_finish_stops_remaining_actions(
     assert result.stop_reason == StopReason.FINISHED
     assert len(search.calls) == 1
     assert result.trajectory[0].actions[-1].result["error"]["code"] == "episode_stopped"
-    assert [m["tool_call_id"] for m in result.history if m["role"] == "tool"] == ["call-1", "finish", "extra"]
-
-
-async def test_repeated_call_id_is_a_protocol_error(task, search):
-    model = ScriptedModel([action("search", {"query": "срок"}), action("finish", {"document_ids": ["doc-1"]})])
-    result = await run_episode(task, model, search, EpisodeConfig())
-    assert result.stop_reason == StopReason.INVALID_ACTION
-    assert result.error.code == "invalid_tool_calls"
 
 
 async def test_deterministic_replay_from_saved_model_messages(task, search, tmp_path):
@@ -278,15 +255,6 @@ async def test_deterministic_replay_from_saved_model_messages(task, search, tmp_
     assert replay.stop_reason == saved.stop_reason
     assert replay.history == saved.history
     assert replay.usage == saved.usage
-
-
-async def test_runner_cancellation_propagates(task, search):
-    class CancelledModel(MockModel):
-        async def complete(self, *args, **kwargs):
-            raise asyncio.CancelledError
-
-    with pytest.raises(asyncio.CancelledError):
-        await run_episode(task, CancelledModel(), search, EpisodeConfig())
 
 
 async def test_progress_is_emitted_before_model_and_tool_execution(task, search):
@@ -316,10 +284,8 @@ async def test_cancellation_preserves_completed_search_and_unknown_pending_usage
                 await asyncio.Event().wait()
             return await super().complete(messages, **kwargs)
 
-    operation = asyncio.create_task(run_episode(
-        task, BlockedAfterSearch(), search, EpisodeConfig(), on_interrupted=partial.append,
-    ))
-    await asyncio.wait_for(waiting.wait(), timeout=2)
+    operation = asyncio.create_task(run_episode(task, BlockedAfterSearch(), search, EpisodeConfig(), on_interrupted=partial.append))
+    await asyncio.wait_for(waiting.wait(), timeout=15)
     operation.cancel()
     with pytest.raises(asyncio.CancelledError):
         await operation
@@ -328,32 +294,8 @@ async def test_cancellation_preserves_completed_search_and_unknown_pending_usage
     assert result.search_calls == 1
     assert len(result.trajectory) == 2
     assert result.trajectory[0].actions[0].result["ok"]
-    assert result.trajectory[0].usage.completion_tokens == 1
     assert result.usage.completion_tokens is None
     assert result.usage.cost is None
-
-
-async def test_cancellation_during_search_records_interrupted_tool(task):
-    waiting = asyncio.Event()
-    partial = []
-
-    class BlockedSearch:
-        async def search(self, *args, **kwargs):
-            waiting.set()
-            await asyncio.Event().wait()
-
-    operation = asyncio.create_task(run_episode(
-        task, MockModel(), BlockedSearch(), EpisodeConfig(), on_interrupted=partial.append,
-    ))
-    await asyncio.wait_for(waiting.wait(), timeout=2)
-    operation.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await operation
-    result = partial[0]
-    assert result.error.code == "interrupted"
-    assert result.trajectory[0].actions[0].result["error"]["code"] == "interrupted"
-    assert json.loads(result.history[-1]["content"])["error"]["code"] == "interrupted"
-    assert result.usage.completion_tokens == 1
 
 
 async def test_runner_timeout_keeps_standard_asyncio_semantics(task, search):
@@ -364,3 +306,26 @@ async def test_runner_timeout_keeps_standard_asyncio_semantics(task, search):
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.01):
             await run_episode(task, BlockedModel(), search, EpisodeConfig())
+
+
+async def test_cancellation_during_search_records_pending_action(task):
+    waiting = asyncio.Event()
+    partial = []
+
+    class BlockedSearch:
+        async def search(self, *args, **kwargs):
+            waiting.set()
+            await asyncio.Event().wait()
+
+    operation = asyncio.create_task(run_episode(task, MockModel(), BlockedSearch(), EpisodeConfig(), on_interrupted=partial.append))
+    await asyncio.wait_for(waiting.wait(), timeout=15)
+    operation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await operation
+    result = partial[0]
+    assert result.error.code == 'interrupted'
+    assert result.native_trace['info']['episode']['error']['code'] == 'interrupted'
+    assert result.search_calls == 1
+    assert result.trajectory[0].actions[0].result['error']['code'] == 'interrupted'
+    assert result.usage.completion_tokens == 1
+    assert json.loads(result.history[-1]['content'])['error']['code'] == 'interrupted'

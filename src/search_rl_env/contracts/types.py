@@ -39,14 +39,11 @@ class SearchBackend(Protocol):
 
 
 class EpisodeConfig(Contract):
-    max_steps: int = Field(default=6, ge=1)
-    max_searches: int | None = Field(default=None, ge=0)
-    max_output_tokens: int = Field(default=2048, ge=1)
+    max_steps: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     max_tokens_per_step: int = Field(default=512, ge=1)
-    max_invalid_actions: int = Field(default=2, ge=1)
     search_limit: int = Field(default=10, ge=1)
     max_snippet_chars: int = Field(default=2000, ge=1)
-    max_documents: int = Field(default=10, ge=1)
     seed: int | None = None
 
 
@@ -103,7 +100,6 @@ class ChatModel(Protocol):
 class StopReason(str, Enum):
     FINISHED = "finished"
     MAX_STEPS = "max_steps"
-    MAX_SEARCHES = "max_searches"
     MAX_OUTPUT_TOKENS = "max_output_tokens"
     INVALID_ACTION = "invalid_action"
     INFRASTRUCTURE_ERROR = "infrastructure_error"
@@ -142,7 +138,7 @@ class EpisodeEvent(Contract):
 
 
 class EpisodeResult(Contract):
-    schema_version: Literal["1"] = "1"
+    schema_version: Literal["2"] = "2"
     task_id: str
     episode_id: str
     task: AgentTask
@@ -159,3 +155,5 @@ class EpisodeResult(Contract):
     started_at: datetime
     duration_seconds: float = Field(ge=0)
     error: EpisodeError | None = None
+    reward: float | None = None
+    native_trace: dict[str, Any] | None = None

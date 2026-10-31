@@ -23,6 +23,7 @@ build/
 /models/
 /checkpoints/
 /runs/
+/outputs/
 /logs/
 /mlflow/
 /mlruns/

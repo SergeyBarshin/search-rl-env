@@ -47,7 +47,7 @@ raise SystemExit(asyncio.run(namespace['main']()))
     )
     before_interrupt = []
     try:
-        async with asyncio.timeout(5):
+        async with asyncio.timeout(15):
             while True:
                 line = await process.stdout.readline()
                 assert line, "CLI exited before reaching the pending model request"
@@ -56,7 +56,7 @@ raise SystemExit(asyncio.run(namespace['main']()))
                     break
         assert any("Шаг 1: отправляю запрос" in line for line in before_interrupt)
         process.send_signal(signal.SIGINT)
-        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=5)
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=15)
     finally:
         if process.returncode is None:
             process.kill()

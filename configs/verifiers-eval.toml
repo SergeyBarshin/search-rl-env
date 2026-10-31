@@ -1,0 +1,29 @@
+# Подставьте адрес совместимого Chat Completions сервера перед реальным запуском.
+model = "qwen/qwen3.5-9b"
+push = false
+max_concurrent = 1
+output_dir = "runs/verifiers-eval"
+
+[env.taskset]
+id = "search_rl_env"
+
+[env.agent.harness]
+id = "search_rl_env"
+
+[env.agent.runtime]
+type = "subprocess"
+
+[env.agent]
+network_notice = false
+# Необязательные бюджеты конкретного прогона.
+max_turns = 6
+max_output_tokens = 4096
+
+[client]
+type = "eval"
+base_url = "http://127.0.0.1:8000/v1"
+api_key_var = "MODEL_API_KEY"
+
+[sampling]
+temperature = 0.0
+max_tokens = 1024

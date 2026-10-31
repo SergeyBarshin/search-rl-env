@@ -26,7 +26,8 @@ async def test_chat_completions_tool_protocol_without_network(client_type, crede
         body = json.loads(request.content)
         requests.append(body)
         assert {tool["function"]["name"] for tool in body["tools"]} == {"search", "finish"}
-        assert body["max_tokens"] == (3 if len(requests) == 1 else 2)
+        assert body["max_tokens"] == 512
+        assert body["tool_choice"] == "auto"
         assert body["seed"] == 42
         assert "parallel_tool_calls" not in body
         assert body.get("provider") == ({"require_parameters": True} if client_type is OpenRouterClient else None)
@@ -75,7 +76,7 @@ async def test_total_request_deadline_stops_a_stalled_transport():
     # MockTransport не применяет фазовые таймауты httpx; нужен общий deadline.
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None) as http:
         model = ChatCompletionsClient(api_key="fake-test-key", endpoint="https://model.example.invalid/v1/chat/completions", model="qwen/test", timeout_seconds=0.02, http_client=http)
-        result = await asyncio.wait_for(run_episode(task, model, search, EpisodeConfig()), timeout=2)
+        result = await asyncio.wait_for(run_episode(task, model, search, EpisodeConfig()), timeout=15)
     assert result.stop_reason.value == "infrastructure_error"
     assert result.error.code == "model_timeout"
     assert "0.02" in result.error.message

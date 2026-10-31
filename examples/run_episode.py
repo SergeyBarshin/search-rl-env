@@ -71,9 +71,8 @@ async def main() -> int:
     parser.add_argument("--task", type=Path, default=EXAMPLES_DIR / "fixtures/task.json")
     parser.add_argument("--hits", type=Path, default=EXAMPLES_DIR / "fixtures/search_hits.json")
     parser.add_argument("--output", type=Path, default=Path("runs/demo/episode.json"))
-    parser.add_argument("--max-steps", type=int, default=6)
-    parser.add_argument("--max-searches", type=int, default=None, help="Необязательный отдельный лимит поисков")
-    parser.add_argument("--max-output-tokens", type=int, default=2048)
+    parser.add_argument("--max-steps", type=int, default=None, help="Необязательный лимит ответов модели")
+    parser.add_argument("--max-output-tokens", type=int, default=None, help="Необязательный суммарный бюджет генерации")
     parser.add_argument("--max-tokens-per-step", type=int, default=512)
     parser.add_argument("--seed", type=int, default=None, help="Необязательный seed, если провайдер его поддерживает")
     args = parser.parse_args()
@@ -85,7 +84,6 @@ async def main() -> int:
     search = MockSearch(hits, corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
     config = EpisodeConfig(
         max_steps=args.max_steps,
-        max_searches=args.max_searches,
         max_output_tokens=args.max_output_tokens,
         max_tokens_per_step=args.max_tokens_per_step,
         seed=args.seed,
