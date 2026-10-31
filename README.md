@@ -132,6 +132,7 @@ git diff --check
 | Документ | Что прочитать |
 |---|---|
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Ветки, задачи, PR, ревью и проверки |
+| [HARNESS_REPORT.md](docs/HARNESS_REPORT.md) | Результаты проверки харнесса, ручное тестирование и архитектура |
 | [STRUCTURE.md](docs/STRUCTURE.md) | План папок и границы модулей |
 | [CONTRACTS.md](docs/CONTRACTS.md) | Общие форматы и примеры взаимодействия |
 | [TASKS.md](docs/TASKS.md) | Обязанности и первые результаты по людям |
