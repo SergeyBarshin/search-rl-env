@@ -10,6 +10,7 @@ let waitingAt = 0;
 let elapsedTimer = null;
 let tokens = 0;
 let searches = 0;
+let sqlCalls = 0;
 let lastSequence = 0;
 let cancelRequested = false;
 const toolRows = new Map();
@@ -38,7 +39,7 @@ function setBusy(value) {
   $("stop-button").hidden = !value;
   $("stop-button").disabled = false;
   $("stop-button").replaceChildren(element("span", "", "■"), document.createTextNode("Остановить"));
-  for (const input of $("run-form").querySelectorAll("input, textarea")) input.disabled = value;
+  for (const input of $("run-form").querySelectorAll("input, textarea, select")) input.disabled = value;
   if (!value) {
     clearInterval(elapsedTimer);
     $("waiting").hidden = true;
@@ -74,6 +75,27 @@ function documentCard(hit, compact = false) {
   card.append(header, element("p", "", hit.snippet || ""));
   return card;
 }
+
+function sqlTable(columns, rows, truncated = false) {
+  const wrapper = element('div', 'table-scroll');
+  const table = element('table', 'sql-table');
+  const head = element('thead');
+  const headings = element('tr');
+  for (const column of columns) headings.append(element('th', '', column));
+  head.append(headings);
+  const body = element('tbody');
+  for (const values of rows) {
+    const tr = element('tr');
+    for (const value of values) tr.append(element('td', '', value === null ? 'NULL' : String(value)));
+    body.append(tr);
+  }
+  table.append(head, body);
+  wrapper.append(table);
+  wrapper.append(element('p', 'field-hint', `${rows.length} строк${truncated ? ' · результат обрезан' : ''}`));
+  return wrapper;
+}
+
+function showToolCounts() { $('searches-value').textContent = `${searches} / ${sqlCalls}`; }
 
 function renderProgress(event) {
   const { kind, step, details } = event;
@@ -113,11 +135,15 @@ function renderProgress(event) {
       entry.wrapper.append(element("p", "error-message", `${result.error?.code || "tool_error"}: ${result.error?.message || "Ошибка инструмента"}`));
     } else if (details.name === "search") {
       searches += 1;
-      $("searches-value").textContent = searches;
+      showToolCounts();
       const hits = element("div", "tool-result");
       for (const hit of result.hits || []) hits.append(documentCard(hit));
       if (!result.hits?.length) hits.append(element("p", "event-description", "Поиск не вернул документов."));
       entry.wrapper.append(hits);
+    } else if (details.name === 'sql') {
+      sqlCalls += 1;
+      showToolCounts();
+      entry.wrapper.append(sqlTable(result.columns || [], result.rows || [], result.truncated));
     } else {
       entry.wrapper.append(element("p", "tool-finished", "Выбор принят. Эпизод завершён."));
     }
@@ -133,13 +159,19 @@ function finish(data) {
   else if (result.truncated) setStatus("Бюджет исчерпан", "limited");
   else setStatus("Ошибка эпизода", "error");
   $("steps-value").textContent = result.trajectory.length;
-  $("searches-value").textContent = result.search_calls;
+  searches = result.search_calls; sqlCalls = result.sql_calls || 0; showToolCounts();
   $("tokens-value").textContent = formatNumber(result.usage.completion_tokens);
   $("time-value").textContent = clock(result.duration_seconds);
   $("result-section").hidden = false;
   $("result-heading").textContent = cancelled ? "Эпизод остановлен" : result.truncated ? "Остановка по бюджету" : "Выбранные документы";
   $("result-count").textContent = result.selected_document_ids.length;
-  const discovered = new Map((settings?.hits || []).map((hit) => [hit.doc_id, hit]));
+  if (result.answer !== null && result.answer !== undefined) {
+    $('answer-section').hidden = false;
+    for (const value of result.answer) $('answer-values').append(element('span', 'answer-chip', value));
+    if (!result.answer.length) $('answer-values').append(element('p', 'empty-result', 'Подходящих заказов нет.'));
+    $('result-heading').textContent = 'Документы-источники';
+  }
+  const discovered = new Map((selectedScenario()?.hits || settings?.hits || []).map((hit) => [hit.doc_id, hit]));
   for (const turn of result.trajectory) for (const action of turn.actions) for (const hit of action.result.hits || []) discovered.set(hit.doc_id, hit);
   for (const [index, id] of result.selected_document_ids.entries()) $("result-documents").append(documentCard({ ...discovered.get(id), doc_id: id, rank: index + 1 }));
   if (!result.selected_document_ids.length) $("result-documents").append(element("p", "empty-result", cancelled ? "Частичная траектория сохранена." : "Финальный список пуст. Полученные документы доступны в траектории."));
@@ -176,15 +208,17 @@ function reset() {
   if (stream) stream.close();
   runId = null;
   cancelRequested = false;
-  lastSequence = 0; tokens = 0; searches = 0;
+  lastSequence = 0; tokens = 0; searches = 0; sqlCalls = 0;
   toolRows.clear(); modelRows.clear();
   $("activity").replaceChildren();
   $("result-documents").replaceChildren();
+  $('answer-values').replaceChildren();
+  $('answer-section').hidden = true;
   for (const id of ["empty-state", "result-section", "result-footer", "json-section", "form-error", "result-error"]) $(id).hidden = true;
   $("json-section").open = false;
   $("activity").hidden = false;
   $("steps-value").textContent = "0";
-  $("searches-value").textContent = "0";
+  showToolCounts();
   $("tokens-value").textContent = "—";
   $("time-value").textContent = "00:00";
 }
@@ -200,7 +234,7 @@ $("run-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (busy) return;
   const optionalNumber = (id) => $(id).value.trim() ? Number($(id).value) : null;
-  const body = { question: $("question").value, mode: mode(), model_id: $("model-id").value.trim(), max_steps: optionalNumber("max-steps"), max_output_tokens: optionalNumber("max-tokens"), max_tokens_per_step: Number($("per-step").value), request_timeout: Number($("timeout").value) };
+  const body = { question: $("question").value, scenario: $('scenario').value, mode: mode(), model_id: $("model-id").value.trim(), max_steps: optionalNumber("max-steps"), max_output_tokens: optionalNumber("max-tokens"), max_tokens_per_step: Number($("per-step").value), request_timeout: Number($("timeout").value) };
   reset(); setBusy(true); setStatus("Выполняется", "running"); waitFor("Запускаем среду…");
   startedAt = Date.now();
   elapsedTimer = setInterval(() => {
@@ -252,8 +286,24 @@ $("run-form").addEventListener("invalid", (event) => {
 function updateMode() {
   const api = mode() === "api";
   $("api-fields").hidden = !api;
-  $("mode-hint").textContent = api ? "Модель выбирает запросы и момент завершения. Поиск остаётся моковым." : "Мок выполняет search → finish. Usage условный.";
+  $("mode-hint").textContent = api ? "Модель выбирает запросы и момент завершения. Инструменты используют тестовые данные." : $('scenario').value === 'sql_rag' ? "Мок выполняет search → sql → finish. Usage условный." : "Мок выполняет search → finish. Usage условный.";
 }
+
+function selectedScenario() { return settings?.scenarios?.find((scenario) => scenario.id === $('scenario').value); }
+function updateScenario(changeQuestion = true) {
+  const scenario = selectedScenario();
+  if (!scenario) return;
+  if (changeQuestion) $('question').value = scenario.question;
+  $('corpus-count').textContent = scenario.hits.length;
+  $('corpus-documents').replaceChildren(...scenario.hits.map((hit) => documentCard(hit, true)));
+  $('database-section').hidden = !scenario.sql_schema;
+  if (scenario.sql_schema) {
+    $('database-schema').textContent = scenario.sql_schema;
+    $('database-rows').replaceChildren(sqlTable(scenario.columns, scenario.rows));
+  }
+  updateMode();
+}
+$('scenario').addEventListener('change', () => updateScenario());
 for (const radio of document.querySelectorAll('input[name="mode"]')) radio.addEventListener("change", updateMode);
 document.addEventListener("keydown", (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter" && !busy) $("run-form").requestSubmit();
@@ -265,8 +315,7 @@ async function initialize() {
     if (!response.ok) throw new Error("Не удалось загрузить настройки UI.");
     settings = await response.json();
     $("model-id").value = settings.model_id;
-    $("corpus-count").textContent = settings.hits.length;
-    for (const hit of settings.hits) $("corpus-documents").append(documentCard(hit, true));
+    updateScenario(false);
     if (settings.api_error) {
       $("api-note").textContent = settings.api_error;
       $("api-note").hidden = false;

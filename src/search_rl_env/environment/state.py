@@ -8,6 +8,8 @@ class SearchState(State):
     discovered_ids: set[str] = Field(default_factory=set)
     selected_ids: list[str] = Field(default_factory=list)
     searches: int = 0
+    sql_calls: int = 0
+    answer: list[str] | None = None
     invalid_actions: int = 0
     stop_reason: StopReason | None = None
     error: EpisodeError | None = None

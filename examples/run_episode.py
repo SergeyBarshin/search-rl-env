@@ -16,7 +16,9 @@ from pydantic import TypeAdapter
 from search_rl_env.agent import run_episode, save_episode
 from search_rl_env.agent.auth import load_api_key
 from search_rl_env.agent.client import ChatCompletionsClient, OpenRouterClient
-from search_rl_env.agent.mocks import MockModel, MockSearch
+from search_rl_env.agent.mocks import MockModel, MockSearch, MockSqlRagModel
+from search_rl_env.environment.demo import HYBRID_HITS, hybrid_task
+from search_rl_env.environment.sql import MockSql
 from search_rl_env.contracts import AgentTask, EpisodeConfig, EpisodeResult, SearchHit
 from search_rl_env.contracts.types import EpisodeEvent, StopReason
 
@@ -64,6 +66,7 @@ def positive_seconds(value: str) -> float:
 async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=["mock", "api", "openrouter"], default="mock")
+    parser.add_argument("--scenario", choices=["retrieval", "sql_rag"], default="retrieval")
     parser.add_argument("--model-id", help="Model id; также MODEL_ID или OPENROUTER_MODEL")
     parser.add_argument("--question", help="Заменить вопрос в задаче своим текстом")
     parser.add_argument("--verbose", action="store_true", help="Показывать шаги и ожидание ответа по ходу эпизода")
@@ -81,6 +84,9 @@ async def main() -> int:
     if args.question is not None:
         task = AgentTask.model_validate({**task.model_dump(), "question": args.question})
     hits = TypeAdapter(list[SearchHit]).validate_json(args.hits.read_text(encoding="utf-8"))
+    if args.scenario == 'sql_rag':
+        task = hybrid_task(question=args.question) if args.question is not None else hybrid_task()
+        hits = list(HYBRID_HITS)
     search = MockSearch(hits, corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
     config = EpisodeConfig(
         max_steps=args.max_steps,
@@ -101,7 +107,8 @@ async def main() -> int:
 
         heartbeat = asyncio.create_task(progress.heartbeat()) if progress is not None else None
         try:
-            return await run_episode(task, model, search, config, on_event=progress, on_interrupted=remember_partial)
+            return await run_episode(task, model, search, config, on_event=progress, on_interrupted=remember_partial,
+                                     sql=MockSql() if args.scenario == 'sql_rag' else None)
         except asyncio.CancelledError:
             if partial is None:
                 raise
@@ -115,7 +122,7 @@ async def main() -> int:
 
     print(f"Запуск: {args.model}; таймаут запроса модели={args.request_timeout:g} с; поиск=mock", flush=True)
     if args.model == "mock":
-        result = await execute_episode(MockModel())
+        result = await execute_episode(MockSqlRagModel() if args.scenario == 'sql_rag' else MockModel())
     elif args.model == "api":
         load_dotenv(EXAMPLES_DIR.parent / ".env")
         model_id = args.model_id or os.getenv("MODEL_ID", "")
@@ -152,6 +159,8 @@ async def main() -> int:
     if result.error:
         print(f"error={result.error.code}: {result.error.message}")
     print(f"stop_reason={result.stop_reason.value}; documents={result.selected_document_ids}; result={path}")
+    if result.answer is not None:
+        print(f"answer={json.dumps(result.answer, ensure_ascii=False)}; sql_calls={result.sql_calls}")
     return 130 if interrupted else (0 if result.stop_reason == StopReason.FINISHED else 1)
 
 

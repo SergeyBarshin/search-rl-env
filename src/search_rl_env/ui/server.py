@@ -21,7 +21,9 @@ from pydantic import Field, ValidationError, field_validator
 from search_rl_env.agent import run_episode, save_episode
 from search_rl_env.agent.auth import load_api_key
 from search_rl_env.agent.client import ChatCompletionsClient
-from search_rl_env.agent.mocks import MockModel, MockSearch
+from search_rl_env.agent.mocks import MockModel, MockSearch, MockSqlRagModel
+from search_rl_env.environment.demo import HYBRID_HITS, HYBRID_QUESTION, hybrid_task
+from search_rl_env.environment.sql import MockSql, ORDERS, ORDERS_SCHEMA
 from search_rl_env.contracts import AgentTask, EpisodeConfig, EpisodeResult, SearchHit
 from search_rl_env.contracts.types import Contract, EpisodeEvent
 
@@ -36,6 +38,7 @@ DEMO_HITS = [
 class RunRequest(Contract):
     question: str = Field(min_length=1)
     mode: Literal["mock", "api"] = "mock"
+    scenario: Literal["retrieval", "sql_rag"] = "retrieval"
     model_id: str = ""
     max_steps: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
@@ -85,7 +88,7 @@ class Workbench:
         try:
             async with AsyncExitStack() as stack:
                 if run.request.mode == "mock":
-                    model = MockModel()
+                    model = MockSqlRagModel() if run.request.scenario == 'sql_rag' else MockModel()
                 else:
                     model = await stack.enter_async_context(ChatCompletionsClient(
                         api_key=load_api_key(),
@@ -96,13 +99,18 @@ class Workbench:
                     ))
                 task = AgentTask(task_id="ui-" + run.id, question=run.request.question,
                                  language="ru", corpus_id="synthetic-demo", corpus_revision="v1")
-                search = MockSearch(DEMO_HITS, corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
+                hybrid = run.request.scenario == 'sql_rag'
+                if hybrid:
+                    task = hybrid_task(task_id='ui-' + run.id, question=run.request.question)
+                search = MockSearch(HYBRID_HITS if hybrid else DEMO_HITS,
+                                    corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
                 config = EpisodeConfig(max_steps=run.request.max_steps,
                                        max_output_tokens=run.request.max_output_tokens,
                                        max_tokens_per_step=run.request.max_tokens_per_step)
                 try:
                     run.result = await run_episode(task, model, search, config,
-                                                   on_event=run.progress, on_interrupted=remember)
+                                                   on_event=run.progress, on_interrupted=remember,
+                                                   sql=MockSql() if hybrid else None)
                 except asyncio.CancelledError:
                     run.result = partial
             if run.result is None:
@@ -163,6 +171,12 @@ async def settings(request):
         "api_error": api_configuration_error(),
         "hits": [hit.model_dump() for hit in DEMO_HITS],
         "corpus_id": "synthetic-demo",
+        "scenarios": [
+            {"id": "retrieval", "question": DEFAULT_QUESTION, "hits": [hit.model_dump() for hit in DEMO_HITS]},
+            {"id": "sql_rag", "question": HYBRID_QUESTION, "hits": [hit.model_dump() for hit in HYBRID_HITS],
+             "sql_schema": ORDERS_SCHEMA, "columns": ['order_id', 'status', 'delay_days', 'region'],
+             "rows": [list(row) for row in ORDERS]},
+        ],
     })
 
 

@@ -57,3 +57,33 @@ class MockModel:
             finish_reason="tool_calls",
             model="search-then-finish-v1",
         )
+
+
+class MockSqlRagModel(MockModel):
+    @property
+    def metadata(self):
+        return {"adapter": "mock", "model": "search-sql-finish-v1"}
+
+    async def complete(self, messages, *, tools, max_output_tokens, seed):
+        results = [json.loads(message['content']) for message in messages if message['role'] == 'tool']
+        table = next((result for result in results if result.get('ok') and 'columns' in result), None)
+        if table is not None:
+            column = table['columns'].index('order_id')
+            answer = [row[column] for row in table['rows']]
+            hits = [hit for result in results for hit in result.get('hits', [])]
+            name = 'finish'
+            arguments = {'answer': answer, 'document_ids': [hits[0]['doc_id']] if hits else []}
+        elif results:
+            name = 'sql'
+            arguments = {'query': "SELECT order_id FROM orders WHERE region = 'RU' AND status = 'delivered' AND delay_days > 3 ORDER BY order_id"}
+        else:
+            name = 'search'
+            arguments = {'query': 'регламент компенсаций заказов'}
+        return ModelResponse(
+            message={'role': 'assistant', 'content': None, 'tool_calls': [{
+                'id': f'hybrid-call-{len(results) + 1}', 'type': 'function',
+                'function': {'name': name, 'arguments': json.dumps(arguments, ensure_ascii=False)},
+            }]},
+            usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1, cost=0.0),
+            finish_reason='tool_calls', model=self.metadata['model'],
+        )

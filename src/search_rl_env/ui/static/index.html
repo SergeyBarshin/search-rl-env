@@ -21,14 +21,16 @@
   <main class="workspace">
     <div class="page-heading">
       <div><p class="eyebrow">SEARCH RL ENV</p><h1>Проверим агента в деле<span class="heading-dot">.</span></h1>
-        <p class="subtitle">Задайте вопрос и проследите путь от запроса до выбранных документов.</p></div>
-      <div class="environment-tags"><span>Verifiers v1</span><span><span class="dot muted-dot"></span>Поиск на моках</span></div>
+        <p class="subtitle">Задайте вопрос и проследите путь от документов и таблиц до ответа.</p></div>
+      <div class="environment-tags"><span>Verifiers v1</span><span><span class="dot muted-dot"></span>Инструменты на моках</span></div>
     </div>
 
     <div class="layout">
       <section class="panel setup-panel" aria-labelledby="setup-heading">
         <div class="panel-heading"><span class="section-number">01</span><h2 id="setup-heading">Новый эпизод</h2></div>
         <form id="run-form">
+          <label for="scenario" class="field-label">Сценарий</label>
+          <select id="scenario"><option value="retrieval">Поиск документов</option><option value="sql_rag">SQL + RAG · компенсации заказов</option></select>
           <label for="question" class="field-label">Вопрос</label>
           <textarea id="question" name="question" rows="4" required placeholder="Что агенту нужно найти?">Какие документы описывают перенос срока проекта?</textarea>
 
@@ -67,26 +69,30 @@
         <details class="corpus" open><summary><span>Тестовый корпус<span id="corpus-count" class="count">2</span></span><span class="chevron" aria-hidden="true">⌄</span></summary>
           <p class="field-hint corpus-hint">Выдача фиксирована для любого запроса.</p><div id="corpus-documents"></div>
         </details>
+        <details id="database-section" class="corpus database-section" hidden><summary><span>Тестовая SQL-база<span class="count">6</span></span><span class="chevron" aria-hidden="true">⌄</span></summary>
+          <p class="field-hint">SQLite в памяти · только чтение</p><pre id="database-schema"></pre><div id="database-rows"></div>
+        </details>
       </section>
 
       <section class="panel trajectory-panel" aria-labelledby="trajectory-heading">
         <div class="panel-heading trajectory-heading"><div class="panel-title"><span class="section-number">02</span><h2 id="trajectory-heading">Траектория</h2></div><span id="status" class="status idle"><span class="dot"></span>Готов к запуску</span></div>
         <div class="metrics" aria-label="Статистика эпизода">
           <div><span class="metric-label">Шаги модели</span><strong id="steps-value">—</strong></div>
-          <div><span class="metric-label">Поиски</span><strong id="searches-value">—</strong></div>
+          <div><span class="metric-label">Поиск / SQL</span><strong id="searches-value">—</strong></div>
           <div><span class="metric-label">Выходные токены</span><strong id="tokens-value">—</strong></div>
           <div><span class="metric-label">Время</span><strong id="time-value">00:00</strong></div>
         </div>
 
         <div id="empty-state" class="empty-state">
           <div class="empty-flow" aria-hidden="true"><span>?</span><i></i><span class="search-symbol">⌕</span><i></i><span>✓</span></div>
-          <h3>Каждое действие на виду</h3><p>Здесь появятся запросы модели, результаты поиска<br>и финальный выбор документов.</p>
+          <h3>Каждое действие на виду</h3><p>Здесь появятся поисковые и SQL-запросы,<br>результаты инструментов и ответ агента.</p>
           <span class="empty-caption">ВОПРОС<span>→</span>ПОИСК<span>→</span>РЕЗУЛЬТАТ</span>
         </div>
         <div id="activity" class="activity" role="log" aria-label="Действия агента" aria-live="polite" hidden></div>
         <div id="waiting" class="waiting" hidden><span class="spinner" aria-hidden="true"></span><span id="waiting-label">Запускаем среду…</span><span id="waiting-time"></span></div>
 
         <section id="result-section" class="result-section" aria-labelledby="result-heading" hidden>
+          <div id="answer-section" hidden><h3>Ответ · подходящие заказы</h3><div id="answer-values"></div></div>
           <div class="result-heading"><h3 id="result-heading">Выбранные документы</h3><span id="result-count" class="count"></span></div>
           <div id="result-documents"></div><p id="result-error" class="error-message" hidden></p>
         </section>

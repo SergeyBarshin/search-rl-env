@@ -9,7 +9,7 @@ import verifiers.v1 as vf
 from pydantic import Field
 
 from search_rl_env.agent.tools import ToolCall, execute_tool
-from search_rl_env.contracts.types import SearchHit, ToolExecution
+from search_rl_env.contracts.types import SearchHit, ToolExecution, SqlResult, SqlQueryError
 from .state import SearchState
 
 
@@ -19,6 +19,7 @@ class SearchToolsetConfig(vf.ToolsetConfig):
     search_limit: int = Field(default=10, ge=1)
     max_snippet_chars: int = Field(default=2000, ge=1)
     hits: list[SearchHit] = Field(default_factory=list)
+    enable_sql: bool = False
 
 
 class SearchToolset(vf.Toolset[SearchToolsetConfig, SearchState]):
@@ -40,7 +41,9 @@ class SearchToolset(vf.Toolset[SearchToolsetConfig, SearchState]):
         self.state.pending_calls.remove(pending)
         call = ToolCall.model_validate(pending)
         started = perf_counter()
-        result = await execute_tool(call, task=self.task, search=BackendView(self), config=self.config, state=self.state)
+        backend = BackendView(self)
+        result = await execute_tool(call, task=self.task, search=backend, config=self.config,
+                                    state=self.state, sql=backend if self.config.enable_sql else None)
         self.state.actions.append(ToolExecution(
             tool_call_id=call.id, name=name, arguments=call.function.arguments,
             result=result, duration_seconds=perf_counter() - started,
@@ -69,6 +72,20 @@ class SearchToolset(vf.Toolset[SearchToolsetConfig, SearchState]):
             response.raise_for_status()
             return [SearchHit.model_validate(item) for item in response.json()]
 
+    async def sql_backend(self, query):
+        if self.config.backend_url is None:
+            from .sql import MockSql
+            return await MockSql().query(query)
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(self.config.backend_url + '/sql',
+                headers={'Authorization': 'Bearer ' + os.environ.get('SEARCH_RL_BRIDGE_TOKEN', '')},
+                json={'query': query})
+            response.raise_for_status()
+            data = response.json()
+            if 'query_error' in data:
+                raise SqlQueryError(data['query_error'])
+            return SqlResult.model_validate(data)
+
 
 class BackendView:
     def __init__(self, tools):
@@ -76,6 +93,9 @@ class BackendView:
 
     async def search(self, *args, **kwargs):
         return await self.tools.search_backend(*args, **kwargs)
+
+    async def query(self, query):
+        return await self.tools.sql_backend(query)
 
 
 if __name__ == '__main__':

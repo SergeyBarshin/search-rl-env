@@ -9,23 +9,26 @@ from uuid import uuid4
 
 from aiohttp import web
 
-from search_rl_env.contracts.types import EpisodeError, EpisodeEvent, ModelError, Usage
+from search_rl_env.contracts.types import EpisodeError, EpisodeEvent, ModelError, Usage, SqlQueryError
 
 
 class BackendBridge:
-    def __init__(self, task, model, search, config, on_event=None):
+    def __init__(self, task, model, search, config, on_event=None, *, sql=None):
         self.task, self.model, self.search, self.config = task, model, search, config
         self.on_event = on_event
         self.token = uuid4().hex
         self.key_var = 'SEARCH_RL_API_KEY_' + uuid4().hex.upper()
         self.records = []
         self.search_calls = 0
+        self.sql_calls = 0
+        self.sql = sql
         self.error = None
         self._active = set()
 
     async def __aenter__(self):
         app = web.Application(middlewares=[self._authorize])
-        app.add_routes([web.post('/v1/chat/completions', self._model), web.post('/search', self._search)])
+        app.add_routes([web.post('/v1/chat/completions', self._model), web.post('/search', self._search),
+                        web.post('/sql', self._sql)])
         self.runner = web.AppRunner(app, shutdown_timeout=0.1, handle_signals=False)
         await self.runner.setup()
         site = web.TCPSite(self.runner, '127.0.0.1', 0)
@@ -118,3 +121,17 @@ class BackendBridge:
             raise
         except Exception as exc:
             return web.json_response({'error': f'Ошибка поиска: {type(exc).__name__}.'}, status=502)
+
+    async def _sql(self, request):
+        if self.sql is None:
+            raise web.HTTPNotFound()
+        body = await request.json()
+        self.sql_calls += 1
+        try:
+            return web.json_response((await self.sql.query(body['query'])).model_dump())
+        except SqlQueryError as exc:
+            return web.json_response({'query_error': str(exc)})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            return web.json_response({'error': f'Ошибка SQL: {type(exc).__name__}.'}, status=502)

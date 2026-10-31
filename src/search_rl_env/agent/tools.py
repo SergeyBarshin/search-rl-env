@@ -11,6 +11,9 @@ from search_rl_env.contracts.types import (
     SearchBackend,
     SearchHit,
     StopReason,
+    SqlBackend,
+    SqlQueryError,
+    SqlResult,
 )
 
 
@@ -20,6 +23,14 @@ class SearchArguments(Contract):
 
 class FinishArguments(Contract):
     document_ids: list[str]
+
+
+class SqlArguments(Contract):
+    query: str = Field(min_length=1)
+
+
+class HybridFinishArguments(FinishArguments):
+    answer: list[str]
 
 
 class FunctionCall(Contract):
@@ -70,20 +81,24 @@ async def execute_tool(
     search: SearchBackend,
     config,
     state,
+    sql: SqlBackend | None = None,
 ) -> dict:
     if state.stop_reason is not None:
         return tool_error("episode_stopped", "Эпизод уже остановлен; действие не выполнено.")
 
     name, arguments = call.function.name, call.function.arguments
-    if name not in {"search", "finish"}:
-        return invalid_action(state, "unknown_tool", "Доступны только search и finish.")
+    if name not in ({"search", "sql", "finish"} if sql is not None else {"search", "finish"}):
+        return invalid_action(state, "unknown_tool", "Неизвестный инструмент.")
     try:
         if name == "search":
             parsed = SearchArguments.model_validate_json(arguments)
             if not parsed.query.strip():
                 return invalid_action(state, "invalid_arguments", "Запрос не может быть пустым.")
+        elif name == "sql":
+            parsed = SqlArguments.model_validate_json(arguments)
         else:
-            parsed = FinishArguments.model_validate_json(arguments)
+            validator = HybridFinishArguments if sql is not None else FinishArguments
+            parsed = validator.model_validate_json(arguments)
     except ValidationError:
         return invalid_action(state, "invalid_arguments", f"Аргументы {name} не соответствуют схеме.")
 
@@ -92,8 +107,23 @@ async def execute_tool(
         if any(doc_id not in state.discovered_ids for doc_id in document_ids):
             return invalid_action(state, "unknown_document", "В finish разрешены только показанные id.")
         state.selected_ids = document_ids
+        if isinstance(parsed, HybridFinishArguments):
+            state.answer = list(dict.fromkeys(parsed.answer))
         state.stop_reason = StopReason.FINISHED
-        return {"ok": True, "document_ids": document_ids}
+        return {"ok": True, "document_ids": document_ids, **(
+            {"answer": state.answer} if isinstance(parsed, HybridFinishArguments) else {})}
+
+    if isinstance(parsed, SqlArguments):
+        state.sql_calls += 1
+        try:
+            result = SqlResult.model_validate(await sql.query(parsed.query))
+            return {"ok": True, **result.model_dump()}
+        except SqlQueryError as exc:
+            return invalid_action(state, "sql_query_error", str(exc))
+        except Exception as exc:
+            state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
+            state.error = EpisodeError(code="sql_error", message=f"Ошибка SQL-бэкенда: {type(exc).__name__}.")
+            return tool_error(state.error.code, state.error.message)
 
     state.searches += 1
     try:

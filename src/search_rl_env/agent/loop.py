@@ -17,7 +17,7 @@ from verifiers.v1.configs.agent import AgentConfig, TimeoutConfig
 
 from search_rl_env.contracts.types import (
     AgentTask, ChatModel, EpisodeConfig, EpisodeError, EpisodeEvent, EpisodeResult,
-    EpisodeStep, SearchBackend, StopReason, ToolExecution, Usage,
+    EpisodeStep, SearchBackend, StopReason, ToolExecution, Usage, SqlBackend,
 )
 from search_rl_env.environment.state import SearchState
 from search_rl_env.environment.taskset import SearchTask, SearchTaskConfig, SearchTaskData
@@ -25,7 +25,7 @@ from search_rl_env.environment.tools import SearchToolsetConfig
 
 from .bridge import BackendBridge
 from .harness import SearchHarnessConfig
-from .prompts import SYSTEM_PROMPT
+from .prompts import SYSTEM_PROMPT, HYBRID_SYSTEM_PROMPT
 
 
 def episode_from_trace(task, model, config, trace, bridge, *, interrupted=False):
@@ -100,6 +100,8 @@ def episode_from_trace(task, model, config, trace, bridge, *, interrupted=False)
         duration_seconds=max(0, time() - trace.timing.start) if trace else 0,
         error=error, reward=trace.reward if trace and trace.ok and has_reference else None,
         native_trace=native,
+        answer=state.answer if reason == StopReason.FINISHED else None,
+        sql_calls=max(state.sql_calls, bridge.sql_calls),
     )
 
 
@@ -112,16 +114,23 @@ async def run_episode(
     on_event: Callable[[EpisodeEvent], None] | None = None,
     on_interrupted: Callable[[EpisodeResult], None] | None = None,
     reference_document_ids: list[str] | None = None,
+    sql: SqlBackend | None = None,
+    reference_answer: list[str] | None = None,
 ) -> EpisodeResult:
     """Запустить vf.Agent с инструментами vf.Toolset и получить нативную траекторию."""
-    async with BackendBridge(task, model, search, config, on_event) as bridge:
+    async with BackendBridge(task, model, search, config, on_event, sql=sql) as bridge:
+        public = task.model_dump()
+        if sql is not None:
+            public['sql_schema'] = sql.schema
         search_task = SearchTask(
-            SearchTaskData(id=task.task_id, agent_task=task, prompt=task.model_dump_json(),
-                system_prompt=SYSTEM_PROMPT,
-                reference_document_ids=reference_document_ids),
+            SearchTaskData(id=task.task_id, agent_task=task, prompt=json.dumps(public, ensure_ascii=False),
+                system_prompt=HYBRID_SYSTEM_PROMPT if sql is not None else SYSTEM_PROMPT,
+                reference_document_ids=reference_document_ids,
+                sql_schema=sql.schema if sql is not None else None, reference_answer=reference_answer),
             SearchTaskConfig(tools=SearchToolsetConfig(
                 backend_url=bridge.url, search_limit=config.search_limit,
                 max_snippet_chars=config.max_snippet_chars,
+                enable_sql=sql is not None,
             )),
             runtime_env={"SEARCH_RL_BRIDGE_TOKEN": bridge.token},
             on_event=on_event,

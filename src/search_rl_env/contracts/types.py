@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Contract(BaseModel):
@@ -36,6 +36,31 @@ class SearchBackend(Protocol):
         corpus_revision: str | None,
         limit: int,
     ) -> list[SearchHit]: ...
+
+
+class SqlResult(Contract):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+    columns: list[str]
+    rows: list[list[str | int | float | None]]
+    truncated: bool = False
+
+    @model_validator(mode="after")
+    def matching_columns(self):
+        if any(len(row) != len(self.columns) for row in self.rows):
+            raise ValueError("Число значений в строке должно совпадать с числом колонок.")
+        return self
+
+
+class SqlQueryError(ValueError):
+    """Ошибка запроса с безопасным для наблюдения сообщением."""
+
+
+class SqlBackend(Protocol):
+    @property
+    def schema(self) -> str: ...
+
+    async def query(self, query: str) -> SqlResult: ...
 
 
 class EpisodeConfig(Contract):
@@ -138,7 +163,7 @@ class EpisodeEvent(Contract):
 
 
 class EpisodeResult(Contract):
-    schema_version: Literal["2"] = "2"
+    schema_version: Literal["2", "3"] = "3"
     task_id: str
     episode_id: str
     task: AgentTask
@@ -157,3 +182,5 @@ class EpisodeResult(Contract):
     error: EpisodeError | None = None
     reward: float | None = None
     native_trace: dict[str, Any] | None = None
+    answer: list[str] | None = None
+    sql_calls: int = 0

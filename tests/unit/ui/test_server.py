@@ -168,3 +168,19 @@ async def test_other_origins_and_nonlocal_hosts_cannot_start_runs(ui):
 async def test_unknown_run_returns_not_found(ui):
     response = await ui.get("/api/runs/not-found/result")
     assert response.status == 404
+
+
+async def test_hybrid_scenario_returns_sql_rows_answer_and_sources(ui):
+    settings = await (await ui.get('/api/settings')).json()
+    scenario = next(item for item in settings['scenarios'] if item['id'] == 'sql_rag')
+    assert 'CREATE TABLE orders' in scenario['sql_schema']
+    assert len(scenario['rows']) == 6
+    run_id = await start(ui, question=scenario['question'], scenario='sql_rag')
+    events = await read_events(ui, run_id)
+    result = events[-1]['data']['result']
+    assert result['schema_version'] == '3'
+    assert result['answer'] == ['ORD-101', 'ORD-105']
+    assert result['selected_document_ids'] == ['policy-001']
+    assert result['sql_calls'] == 1
+    assert result['stop_reason'] == 'finished'
+    assert [event['data']['details']['name'] for event in events if event['type'] == 'progress' and event['data']['kind'] == 'tool_started'] == ['search', 'sql', 'finish']
