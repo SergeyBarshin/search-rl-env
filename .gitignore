@@ -15,14 +15,14 @@ __pycache__/
 .ruff_cache/
 
 # Datasets, indexes, models, and experiment outputs
-data/
-indexes/
-models/
-checkpoints/
-runs/
-logs/
-mlflow/
-mlruns/
+/data/
+/indexes/
+/models/
+/checkpoints/
+/runs/
+/logs/
+/mlflow/
+/mlruns/
 *.db
 *.sqlite
 *.sqlite3
