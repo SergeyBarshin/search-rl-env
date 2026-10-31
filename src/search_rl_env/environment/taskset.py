@@ -33,21 +33,32 @@ class SearchTaskConfig(vf.TaskConfig):
 
 
 class SearchTask(vf.Task[SearchTaskData, SearchState, SearchTaskConfig]):
-    def __init__(self, data, config=None, *, runtime_env=None, on_event=None):
+    def __init__(self, data, config=None, *, runtime_env=None, on_event=None, search=None, sql=None):
         super().__init__(data, config)
         self._runtime_env = runtime_env or {}
         self._on_event = on_event
         self._emitted = {}
+        self._search, self._sql = search, sql
 
     def runtime_env(self):
         return self._runtime_env
 
     @classmethod
     def toolsets(cls, config):
+        if config.tools.execution == 'in_process':
+            return []
         if config.tools.enable_sql:
             from .hybrid_tools import HybridToolset
             return [HybridToolset(config.tools)]
         return [SearchToolset(config.tools)]
+
+    async def setup(self, trace, runtime):
+        if self.config.tools.execution == 'in_process':
+            if not runtime.is_local:
+                raise vf.TaskError('Для удалённого runtime укажите tools.execution=mcp и harness.execution=subprocess.')
+            from .execution import ToolExecutor
+            trace.state._executor = ToolExecutor(self.data.agent_task, self.config.tools, trace.state,
+                search=self._search, sql=self._sql, token=self._runtime_env.get('SEARCH_RL_BRIDGE_TOKEN'))
 
     def hooks(self, attr):
         hooks = super().hooks(attr)
@@ -82,10 +93,11 @@ class SearchTask(vf.Task[SearchTaskData, SearchState, SearchTaskConfig]):
     def _completed_actions(self, trace):
         # MCP возвращает ошибки схемы/неизвестного инструмента до вызова @vf.tool.
         # Их тоже сохраняем, но не добавляем собственной политики остановки.
+        reconcile = self.config.tools.execution == 'mcp' or bool(trace.request_rewrites)
         calls = {call.id: call for node in trace.nodes
-                 for call in getattr(node.message, 'tool_calls', None) or []}
-        recorded = {action.tool_call_id for action in trace.state.actions}
-        for node in trace.nodes:
+                 for call in getattr(node.message, 'tool_calls', None) or []} if reconcile else {}
+        recorded = {action.tool_call_id for action in trace.state.actions} if reconcile else set()
+        for node in trace.nodes if reconcile else []:
             message = node.message
             if message.role != 'tool' or message.tool_call_id in recorded:
                 continue
@@ -99,12 +111,11 @@ class SearchTask(vf.Task[SearchTaskData, SearchState, SearchTaskConfig]):
             ))
             trace.state.invalid_actions += 1
             recorded.add(call.id)
-        emitted = self._emitted.setdefault(trace.id, set())
         if self._on_event:
-            for action in trace.state.actions:
-                if action.tool_call_id not in emitted:
-                    self._on_event(EpisodeEvent(kind='tool_finished', step=trace.num_turns, details=action.model_dump()))
-                    emitted.add(action.tool_call_id)
+            emitted = self._emitted.get(trace.id, 0)
+            for action in trace.state.actions[emitted:]:
+                self._on_event(EpisodeEvent(kind='tool_finished', step=trace.num_turns, details=action.model_dump()))
+            self._emitted[trace.id] = len(trace.state.actions)
 
     async def finalize(self, trace, runtime):
         self._completed_actions(trace)

@@ -1,5 +1,6 @@
 """Схемы инструментов и проверка аргументов до обращения к бэкенду."""
 
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
@@ -48,7 +49,11 @@ class ToolCall(Contract):
     function: FunctionCall
 
 
-def tool_schemas() -> list[dict]:
+_search_hits = TypeAdapter(list[SearchHit])
+
+
+@lru_cache(maxsize=2)
+def tool_schemas(enable_sql: bool = False) -> list[dict]:
     return [
         {
             "type": "function",
@@ -60,8 +65,10 @@ def tool_schemas() -> list[dict]:
         }
         for name, description, arguments in [
             ("search", "Найти документы по запросу в корпусе задачи.", SearchArguments),
-            ("finish", "Завершить с ранжированными id показанных документов.", FinishArguments),
-        ]
+            ("finish", "Завершить с ранжированными id показанных документов.",
+             HybridFinishArguments if enable_sql else FinishArguments),
+        ] + ([("sql", "Выполнить SQL только на чтение к таблицам из схемы задачи (SQLite).", SqlArguments)]
+             if enable_sql else [])
     ]
 
 
@@ -133,7 +140,7 @@ async def execute_tool(
             corpus_revision=task.corpus_revision,
             limit=config.search_limit,
         )
-        hits = TypeAdapter(list[SearchHit]).validate_python(raw_hits, strict=True)
+        hits = _search_hits.validate_python(raw_hits, strict=True)
     except Exception as exc:
         state.stop_reason = StopReason.INFRASTRUCTURE_ERROR
         # Текст исключения бэкенда может содержать URL, credentials или тело запроса.

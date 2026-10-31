@@ -49,8 +49,8 @@ class TerminalProgress:
             self.waiting_for = None
             print(f"  → {json.dumps(details['result'], ensure_ascii=False)}", flush=True)
         elif event.kind == 'episode_phase' and details['status'] == 'started':
-            phase = {'boot': 'Запуск runtime', 'setup': 'Подготовка Verifiers и MCP',
-                     'agent': 'Запуск программы агента', 'finalize': 'Финализация', 'scoring': 'Оценка'}
+            phase = {'boot': 'Запуск runtime', 'setup': 'Подготовка Verifiers',
+                     'agent': 'Цикл агента', 'finalize': 'Финализация', 'scoring': 'Оценка'}
             print(f"  [+{event.elapsed_seconds or 0:.3f} с] {phase.get(details['phase'], details['phase'])}", flush=True)
         elif event.kind == 'model_progress' and details['status'] == 'started':
             phase = details['phase']

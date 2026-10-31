@@ -1,10 +1,12 @@
-from pydantic import Field
+from pydantic import Field, PrivateAttr
 from verifiers.v1 import State
 
 from search_rl_env.contracts.types import EpisodeError, StopReason, ToolExecution
 
 
 class SearchState(State):
+    # Живые бэкенды принадлежат одному rollout и не входят в wire state/trace.
+    _executor: object = PrivateAttr(default=None)
     discovered_ids: set[str] = Field(default_factory=set)
     selected_ids: list[str] = Field(default_factory=list)
     searches: int = 0

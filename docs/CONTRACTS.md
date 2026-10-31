@@ -42,7 +42,7 @@ class SearchBackend:
 
 `SearchHit`: `doc_id: str`, `snippet: str`, `rank: int` от 1. Корпус и ревизия берутся из задачи. Выдача сохраняет порядок и rank; повторные id в одной выдаче удаляются, показываются первые `search_limit` уникальных результатов, сниппеты обрезаются до `max_snippet_chars`. Только показанные id доступны для `finish`.
 
-Функция запуска принимает любой объект с этим async-интерфейсом. Для локального subprocess Verifiers адаптер `BackendBridge` связывает его с MCP-инструментами. Это транспорт совместимости, своего цикла модели в нём нет. HTTP-контракт промышленного поиска пока не согласован. `SearchToolsetConfig.backend_url` обслуживает адаптер с маршрутом `/search`; запрос содержит query, corpus_id, corpus_revision, limit, ответ — JSON-массив SearchHit.
+Функция запуска принимает любой объект с этим async-интерфейсом. По умолчанию `ToolExecutor` вызывает его напрямую внутри процесса; изменяемое состояние принадлежит отдельной Trace. В режиме subprocess адаптер `BackendBridge` связывает его с MCP-инструментами. Это транспорт совместимости, своего цикла модели в нём нет. HTTP-контракт промышленного поиска пока не согласован. `SearchToolsetConfig.backend_url` обслуживает адаптер с маршрутом `/search`; запрос содержит query, corpus_id, corpus_revision, limit, ответ — JSON-массив SearchHit.
 
 ## Интерфейс запуска для Коли
 
@@ -61,9 +61,33 @@ result = await run_episode(task, model, search, EpisodeConfig(max_steps=6))
 save_episode(result, f"runs/demo/{result.episode_id}.json")
 ```
 
-`model` реализует `ChatModel.complete`, `search` — `SearchBackend.search`. Функция запускает `vf.Agent` с `SearchTask`, MCP-инструментами и штатным chat loop Verifiers. `reference_document_ids` можно передать отдельным keyword-аргументом для оценки разрешённой задачи. Эталон не меняет вход модели. `run_episode` не пишет файл; `save_episode` атомарно сохраняет UTF-8 JSON по пути runner. Новая попытка получает новый `episode_id`.
+`model` реализует `ChatModel.complete`, `search` — `SearchBackend.search`. Функция запускает `vf.Agent` с `SearchTask` и `SearchHarness`; каждый запрос проходит interception Verifiers. По умолчанию инструменты выполняются в том же процессе. `reference_document_ids` можно передать отдельным keyword-аргументом для оценки разрешённой задачи. Эталон не меняет вход модели. `run_episode` не пишет файл; `save_episode` атомарно сохраняет UTF-8 JSON по пути runner. Новая попытка получает новый `episode_id`.
 
 Для нативного runner пакет экспортирует `SearchTaskset` и `SearchHarness` под id `search_rl_env`. Примеры конфигов: `configs/verifiers-eval.toml`, `configs/verifiers-train-rollout.toml`. Нативный runner сохраняет собственный `traces.jsonl`, совместимый запуск — `EpisodeResult` с полем `native_trace`.
+
+## Параллельный запуск
+
+```python
+import asyncio
+from contextlib import aclosing
+from search_rl_env.agent import RolloutRunner, RolloutRequest, save_episode
+
+# model/search/sql должны поддерживать конкурентные async-вызовы.
+# Их lifetime принадлежит вызывающему коду. Эталоны остаются вне AgentTask.
+requests = (RolloutRequest(task, reference_document_ids=reference) for task, reference in train_rows)
+async with RolloutRunner(model, search, EpisodeConfig(), concurrency=16) as runner:
+    async with aclosing(runner.iter_episodes(requests)) as results:
+        async for result in results:
+            await asyncio.to_thread(save_episode, result, f"runs/train/{result.episode_id}.json")
+```
+
+`RolloutRequest` содержит `task`, необязательный `config`, `reference_document_ids` и `reference_answer`. `iter_episodes` принимает `Iterable`/`AsyncIterable` из `AgentTask` или `RolloutRequest`; выдача идёт по готовности. Сопоставляйте результаты по `task_id`/`episode_id`, а не по позиции. Не требуется собирать список всех результатов или заранее создавать asyncio-задачу на каждую строку.
+
+Один runner владеет native interception и транспортом, ограничивает число активных эпизодов общим семафором, число workers и очередь результатов — `concurrency`. При нескольких одновременных batch семафор общий. Медленный consumer создаёт backpressure, память одного batch пропорциональна `concurrency`. Закрытие iterator отменяет только его batch, выход из runner — все его работы, включая ожидающие семафора. Ошибка источника задач пробрасывается вызывающему коду; ошибка модели/инструмента остаётся в соответствующем `EpisodeResult`. `on_interrupted` у `runner.run` сохраняет прежний контракт частичного результата.
+
+`runner.run` принимает те же аргументы, что `run_episode`; model/search/config можно задать один раз в конструкторе или передать конкретному запуску. Для SQL передайте `sql` и приватный `reference_answer`. Отдельный `SearchState` и `ToolExecutor` создаются на каждый rollout; клиенты модели и бэкендов общие, состояния диалогов в них быть не должно.
+
+`execution="in_process"` использует локальные доверенные Python-инструменты. `RolloutRunner(..., execution="subprocess")` включает прежний harness + MCP в отдельных процессах. Для нативного удалённого runtime укажите одновременно `env.agent.harness.execution="subprocess"` и `env.taskset.task.tools.execution="mcp"`; пакет и зависимости должны быть в образе. Внешний тренер использует native `Trace` и `TrainClient`, библиотечный API-клиент сам по себе токены и logprobs для обучения не создаёт.
 
 ## Минимальный цикл и действия
 
@@ -134,7 +158,7 @@ class SqlBackend:
 
 Добавлены необязательные поля без изменения интерфейса `ChatModel.complete`: `ModelResponse.http_profile`, `EpisodeStep.http_profile`, `EpisodeResult.profile`. Старые результаты версии 2/3 читаются со значением `None`. Формат EpisodeProfile имеет `version="1"`, формат строк JSONL — `schema_version="1"`.
 
-Сводка эпизода содержит wall_seconds, setup_seconds, model_seconds, tools_seconds, finalize_seconds, scoring_seconds и other_seconds. Общее время берётся монотонными часами от входа в `run_episode` до завершения его ресурсов; запись файла измеряется отдельно событием persisted в журнале UI. other_seconds — оставшееся время обвязки, IPC и неразнесённых участков, а не чистое CPU-время. framework_seconds сохраняет вложенные фазы Verifiers; agent там включает модель и инструменты, его нельзя прибавлять повторно к сводке.
+Сводка эпизода содержит wall_seconds, setup_seconds, model_seconds, tools_seconds, finalize_seconds, scoring_seconds и other_seconds. Время активного эпизода берётся монотонными часами до освобождения его регистрации и инструментов; ожидание семафора и разовый запуск/закрытие общего runner измеряются в batch wall time отдельно; запись файла измеряется отдельно событием persisted в журнале UI. other_seconds — оставшееся время обвязки, IPC и неразнесённых участков, а не чистое CPU-время. framework_seconds сохраняет вложенные фазы Verifiers; agent там включает модель и инструменты, его нельзя прибавлять повторно к сводке.
 
 HTTP-профиль содержит фазы httpcore с относительными отметками и длительностью, общий статус, код ответа, request_id и допустимый provider_request_id, точный размер исходящего JSON и размер декодированного тела ответа. connection_reused равен None, если транспорт не сообщает trace. Профиль при ошибке доступен через ModelError.http_profile и сохраняется в шаге. При отмене и таймауте остаются частичные фазы и отсутствующие значения None.
 

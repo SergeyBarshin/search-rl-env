@@ -2,7 +2,7 @@
 # Модель, endpoint и renderer должны соответствовать удалённому окружению.
 model = "Qwen/Qwen3.5-9B"
 push = false
-max_concurrent = 1
+max_concurrent = 16
 output_dir = "runs/verifiers-train-rollout"
 
 [env.taskset]

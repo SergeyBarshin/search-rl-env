@@ -21,7 +21,7 @@ from aiohttp import web
 from dotenv import load_dotenv
 from pydantic import Field, ValidationError, field_validator
 
-from search_rl_env.agent import run_episode, save_episode
+from search_rl_env.agent import RolloutRunner, save_episode
 from search_rl_env.agent.auth import load_api_key
 from search_rl_env.agent.client import ChatCompletionsClient
 from search_rl_env.agent.mocks import MockModel, MockSearch, MockSqlRagModel
@@ -87,6 +87,7 @@ class Workbench:
     output_dir: Path
     runs: dict[str, Run] = field(default_factory=dict)
     http: httpx.AsyncClient | None = None
+    runner: RolloutRunner | None = None
 
     async def execute(self, run: Run) -> None:
         partial = None
@@ -121,7 +122,7 @@ class Workbench:
                                        max_output_tokens=run.request.max_output_tokens,
                                        max_tokens_per_step=run.request.max_tokens_per_step)
                 try:
-                    run.result = await run_episode(task, model, search, config,
+                    run.result = await self.runner.run(task, model, search, config,
                                                    on_event=run.progress, on_interrupted=remember,
                                                    sql=MockSql() if hybrid else None)
                 except asyncio.CancelledError:
@@ -334,10 +335,12 @@ async def http_pool(app):
     # а обёртки ChatCompletionsClient не закрывают чужой клиент.
     async with httpx.AsyncClient(timeout=None, limits=httpx.Limits(
         max_connections=20, max_keepalive_connections=20, keepalive_expiry=300,
-    )) as client:
+    )) as client, RolloutRunner(concurrency=20) as runner:
         workbench.http = client
+        workbench.runner = runner
         yield
         workbench.http = None
+        workbench.runner = None
 
 
 def create_app(*, output_dir: str | Path = "runs/ui") -> web.Application:

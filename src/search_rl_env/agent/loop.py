@@ -30,7 +30,7 @@ from .prompts import SYSTEM_PROMPT, HYBRID_SYSTEM_PROMPT
 
 
 def episode_from_trace(task, model, config, trace, bridge, *, interrupted=False, recorder=None):
-    state = trace.state.model_copy(deep=True) if trace is not None else SearchState()
+    state = SearchState.model_validate(trace.state.model_dump()) if trace is not None else SearchState()
     error = state.error or bridge.error
     reason = state.stop_reason
     if interrupted:
@@ -71,13 +71,16 @@ def episode_from_trace(task, model, config, trace, bridge, *, interrupted=False,
             provider=response.provider if response else None,
             response_id=response.response_id if response else None,
             finish_reason=response.finish_reason if response else None)
-        history = deepcopy(record["messages"])
         if response:
-            history.append(deepcopy(response.message))
             for call in response.message.get("tool_calls") or []:
                 if call.get("id") in actions:
                     step.actions.append(actions[call["id"]])
         trajectory.append(step)
+    if bridge.records:
+        last = bridge.records[-1]
+        history = deepcopy(last['messages'])
+        if last['response']:
+            history.append(deepcopy(last['response'].message))
     observed = {message.get("tool_call_id") for message in history if message.get("role") == "tool"}
     for action in state.actions:
         if action.tool_call_id not in observed:
@@ -122,14 +125,24 @@ async def run_episode(
     sql: SqlBackend | None = None,
     reference_answer: list[str] | None = None,
 ) -> EpisodeResult:
-    """Запустить vf.Agent с инструментами vf.Toolset и получить нативную траекторию."""
+    """Одиночный запуск. Для серии эпизодов переиспользуйте RolloutRunner."""
+    from .runner import RolloutRunner
+    async with RolloutRunner(model, search, config, sql=sql, concurrency=1) as runner:
+        return await runner.run(task, on_event=on_event, on_interrupted=on_interrupted,
+            reference_document_ids=reference_document_ids, reference_answer=reference_answer)
+
+
+async def _run_episode(task, model, search, config, *, resources, on_event=None,
+                       on_interrupted=None, reference_document_ids=None, sql=None, reference_answer=None):
     recorder = EpisodeRecorder(on_event)
-    bridge = BackendBridge(task, model, search, config, recorder.emit, sql=sql)
+    bridge = BackendBridge(task, model, search, config, recorder.emit, sql=sql, server=resources.bridge)
     active = None
 
     def observe(trace):
         nonlocal active
         active = trace
+        bridge.trace_id = trace.id
+        resources.bridge.traces[trace.id] = bridge
         recorder.episode_id = trace.id
         recorder.emit(EpisodeEvent(kind="episode_started", step=0, details={
             'model': model.metadata.get('model'), 'adapter': model.metadata.get('adapter'),
@@ -150,19 +163,22 @@ async def run_episode(
                     reference_document_ids=reference_document_ids,
                     sql_schema=sql.schema if sql is not None else None, reference_answer=reference_answer),
                 SearchTaskConfig(tools=SearchToolsetConfig(
+                    execution='mcp' if resources.execution == 'subprocess' else 'in_process',
                     backend_url=bridge.url, search_limit=config.search_limit,
                     max_snippet_chars=config.max_snippet_chars, enable_sql=sql is not None,
                 )),
-                runtime_env={"SEARCH_RL_BRIDGE_TOKEN": bridge.token}, on_event=recorder.emit,
+                runtime_env={"SEARCH_RL_BRIDGE_TOKEN": resources.bridge.token}, on_event=recorder.emit,
+                search=search, sql=sql,
             )
             agent = vf.Agent(AgentConfig(
-                model=model.metadata.get("model") or "model", harness=SearchHarnessConfig(),
+                model=model.metadata.get("model") or "model",
+                harness=SearchHarnessConfig(execution=resources.execution),
                 runtime=vf.SubprocessConfig(),
-                client=vf.EvalClientConfig(base_url=bridge.url + "/v1", api_key_var=bridge.key_var),
+                client=vf.EvalClientConfig(base_url=bridge.model_url, api_key_var=bridge.key_var),
                 sampling=vf.SamplingConfig(temperature=0.0, max_tokens=config.max_tokens_per_step),
                 max_turns=config.max_steps, max_output_tokens=config.max_output_tokens,
                 timeout=TimeoutConfig(setup=60, finalize=10, scoring=10), network_notice=False,
-            ))
+            ), interception=resources.interception)
             trace = await agent.run(search_task, on_trace=observe)
     except asyncio.CancelledError:
         result = episode_from_trace(task, model, config, active, bridge, interrupted=True, recorder=recorder)

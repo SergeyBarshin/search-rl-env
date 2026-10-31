@@ -82,3 +82,20 @@ def test_cli_rejects_invalid_request_timeout(tmp_path):
     assert result.returncode == 2
     assert "Traceback" not in result.stderr
     assert "положительное" in result.stderr
+
+
+def test_parallel_example_saves_results_and_summary(tmp_path):
+    root = Path(__file__).resolve().parents[3]
+    completed = subprocess.run(
+        [sys.executable, str(root / 'examples/run_rollouts.py'), '--episodes', '8', '--concurrency', '3',
+         '--output', str(tmp_path)], cwd=tmp_path, capture_output=True, text=True, check=True, timeout=20,
+    )
+    summary = json.loads(completed.stdout)
+    assert summary == json.loads((tmp_path / 'summary.json').read_text())
+    assert summary['episodes'] == 8 and summary['concurrency'] == 3
+    assert summary['mean_reward'] == 1
+    episodes = [json.loads(path.read_text()) for path in tmp_path.glob('rollout-*.json')]
+    assert len({result['episode_id'] for result in episodes}) == 8
+    assert all(result['answer'] == ['ORD-101', 'ORD-105'] for result in episodes)
+    assert all(len(result['native_trace']['calls']) == 3 for result in episodes)
+    assert "Traceback" not in completed.stderr

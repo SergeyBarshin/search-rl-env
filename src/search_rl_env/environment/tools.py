@@ -3,6 +3,7 @@
 import json
 import os
 from time import perf_counter
+from typing import Literal
 
 import httpx
 import verifiers.v1 as vf
@@ -14,6 +15,7 @@ from .state import SearchState
 
 
 class SearchToolsetConfig(vf.ToolsetConfig):
+    execution: Literal['in_process', 'mcp'] = 'in_process'
     colocated: bool = True
     backend_url: str | None = None
     search_limit: int = Field(default=10, ge=1)
