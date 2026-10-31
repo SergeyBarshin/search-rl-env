@@ -14,8 +14,8 @@ from search_rl_env.contracts import AgentTask, EpisodeConfig, SearchHit
 @pytest.mark.parametrize(("client_type", "credentials", "endpoint", "authorization", "adapter"), [
     (OpenRouterClient, {"api_key": "fake-test-key"}, "https://openrouter.ai/api/v1/chat/completions",
      "Bearer fake-test-key", "openrouter-chat-completions"),
-    (ChatCompletionsClient, {"api_key": "fake-test-key", "endpoint": "https://model.example.invalid/v1/chat/completions", "auth_scheme": "Token"}, "https://model.example.invalid/v1/chat/completions",
-     "Token fake-test-key", "chat-completions"),
+    (ChatCompletionsClient, {"api_key": "fake-test-key", "endpoint": "https://model.example.invalid/v1/chat/completions", "auth_scheme": "Token"},
+     "https://model.example.invalid/v1/chat/completions", "Token fake-test-key", "chat-completions"),
 ])
 async def test_chat_completions_tool_protocol_without_network(client_type, credentials, endpoint, authorization, adapter):
     requests = []
@@ -29,7 +29,7 @@ async def test_chat_completions_tool_protocol_without_network(client_type, crede
         assert body["max_tokens"] == (3 if len(requests) == 1 else 2)
         assert body["seed"] == 42
         assert "parallel_tool_calls" not in body
-        assert body["provider"] == {"require_parameters": True}
+        assert body.get("provider") == ({"require_parameters": True} if client_type is OpenRouterClient else None)
         name, arguments = "search", {"query": "срок"}
         if len(requests) == 2:
             tool = next(m for m in body["messages"] if m["role"] == "tool")
@@ -113,7 +113,7 @@ async def test_openrouter_errors_are_sanitized_and_not_retried(status, body):
     assert len(calls) == 1
 
 
-async def test_api_http_status_is_preserved_in_episode_error():
+async def test_configured_http_status_is_preserved_in_episode_error():
     task = AgentTask(task_id="test", question="Срок?", language="ru", corpus_id="demo")
     search = MockSearch([], corpus_id="demo")
 

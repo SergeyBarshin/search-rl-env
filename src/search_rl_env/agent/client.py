@@ -1,4 +1,4 @@
-"""Chat Completions через OpenRouter или api, без автоповторов запросов."""
+"""Клиенты Chat Completions с настраиваемым endpoint, без автоповторов."""
 
 import asyncio
 import math
@@ -19,6 +19,7 @@ class ChatCompletionsClient:
         endpoint: str,
         auth_scheme: str = "Bearer",
         adapter: str = "chat-completions",
+        require_parameters: bool = False,
         temperature: float = 0.0,
         timeout_seconds: float = 60.0,
         http_client: httpx.AsyncClient | None = None,
@@ -32,6 +33,7 @@ class ChatCompletionsClient:
         self._endpoint = endpoint
         self._auth_scheme = auth_scheme
         self._adapter = adapter
+        self._require_parameters = require_parameters
         self._temperature = temperature
         self._timeout_seconds = timeout_seconds
         self._owns_client = http_client is None
@@ -45,7 +47,7 @@ class ChatCompletionsClient:
             "temperature": self._temperature,
             "timeout_seconds": self._timeout_seconds,
             "endpoint": self._endpoint,
-            "provider": {"require_parameters": True},
+            "require_parameters": self._require_parameters,
         }
 
     async def __aenter__(self) -> "ChatCompletionsClient":
@@ -73,9 +75,10 @@ class ChatCompletionsClient:
             "tool_choice": "required",
             "max_tokens": max_output_tokens,
             "temperature": self._temperature,
-            "provider": {"require_parameters": True},
             "stream": False,
         }
+        if self._require_parameters:
+            payload["provider"] = {"require_parameters": True}
         if seed is not None:
             payload["seed"] = seed
         try:
@@ -118,6 +121,6 @@ class OpenRouterClient(ChatCompletionsClient):
             endpoint="https://openrouter.ai/api/v1/chat/completions",
             auth_scheme="Bearer",
             adapter="openrouter-chat-completions",
+            require_parameters=True,
             **kwargs,
         )
-

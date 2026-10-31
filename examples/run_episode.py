@@ -128,7 +128,11 @@ async def main() -> int:
             api_key = load_api_key()
         except ValueError as exc:
             parser.error(str(exc))
-        async with ChatCompletionsClient(api_key=api_key, endpoint=endpoint, auth_scheme=os.getenv("MODEL_AUTH_SCHEME", "Bearer"), model=model_id, timeout_seconds=args.request_timeout) as model:
+        async with ChatCompletionsClient(
+            api_key=api_key, model=model_id, endpoint=endpoint,
+            auth_scheme=os.getenv("MODEL_AUTH_SCHEME", "Bearer"),
+            timeout_seconds=args.request_timeout,
+        ) as model:
             result = await execute_episode(model)
     else:
         load_dotenv(EXAMPLES_DIR.parent / ".env")

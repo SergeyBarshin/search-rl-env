@@ -46,8 +46,8 @@ flowchart TD
 | [agent/loop.py](../src/search_rl_env/agent/loop.py) | `run_episode`, история, учёт usage, остановка и атомарное JSON-сохранение |
 | [agent/tools.py](../src/search_rl_env/agent/tools.py) | Схемы `search` и `finish`, проверка аргументов, id и поискового бюджета |
 | [agent/prompts.py](../src/search_rl_env/agent/prompts.py) | Начальный промпт, вопрос и сообщения об оставшемся бюджете |
-| [agent/client.py](../src/search_rl_env/agent/client.py) | Общий Chat Completions-клиент и адаптеры Chat Completions и OpenRouter |
-| [agent/auth.py](../src/search_rl_env/agent/auth.py) | Получение локального Token-токена api без его вывода в журнал |
+| [agent/client.py](../src/search_rl_env/agent/client.py) | Общий Chat Completions-клиент и адаптеры настраиваемого API и OpenRouter |
+| [agent/auth.py](../src/search_rl_env/agent/auth.py) | Чтение ключа API из окружения или файла без его вывода в журнал |
 | [agent/mocks.py](../src/search_rl_env/agent/mocks.py) | Детерминированные подставные модель и поиск |
 | [examples/run_episode.py](../examples/run_episode.py) | CLI, выбор клиента, загрузка примера и вывод траектории |
 
@@ -111,7 +111,7 @@ save_episode(result, output_path)
 
 ### Qwen через настроенный API
 
-Это живой API-запуск с локально настроенными адресом, моделью и авторизацией. Параметры доступа находятся в игнорируемом .env.
+Это живой API-запуск с локально заданными адресом и авторизацией. Нужны `MODEL_API_URL`, `MODEL_ID` и `MODEL_API_KEY` либо `MODEL_API_KEY_FILE` в окружении или игнорируемом `.env`. Заголовок авторизации настраивается через `MODEL_AUTH_SCHEME`. На этой машине локальная конфигурация уже подготовлена.
 
 ```bash
 .venv/bin/python examples/run_episode.py \
@@ -144,7 +144,7 @@ git diff --check
 
 В проверенной версии — 53 теста. Они покрывают нормальный цикл, четыре поиска подряд по решению модели, бюджеты, повторы id, несуществующие документы, неправильные аргументы и неизвестный инструмент. Также проверяются исправление ошибочного действия, сбои сервисов, JSON-сохранение, воспроизведение сохранённых действий и отмена задачи runner. Дополнительно проверены общий deadline на зависшем HTTP-транспорте, события до вызова модели, сохранение при отмене модели и поиска, внешний `asyncio.timeout` и настоящий SIGINT дочернему CLI-процессу.
 
-Адаптеры настраиваемого API и OpenRouter проверяются через `httpx.MockTransport`: Token/Bearer-авторизация, схемы при каждом запросе, `tool_call_id`, reasoning-поля, транспортное поле `index`, usage и безопасные сообщения об ошибках. Чтение ключа API тестируется на подставных значениях и файлах. Стандартный pytest не обращается к платным API.
+Адаптеры настраиваемого API и OpenRouter проверяются через `httpx.MockTransport`: настраиваемый заголовок Authorization, схемы при каждом запросе, `tool_call_id`, reasoning-поля, транспортное поле `index`, usage и безопасные сообщения об ошибках. Чтение ключа API тестируется на подставных значениях и файлах. Стандартный pytest не обращается к платным API.
 
 Для отдельной проверки ошибочных действий:
 
