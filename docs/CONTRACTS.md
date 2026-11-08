@@ -130,7 +130,7 @@ async with RolloutRunner(model, search, EpisodeConfig(), concurrency=16) as runn
 
 `on_event` передаёт `model_started`, `model_finished`, `tool_started`, `tool_finished` для терминального прогресса. При отмене callback `on_interrupted` получает частичный результат, затем `CancelledError` распространяется дальше. CLI сохраняет отдельный `*.interrupted.json`, не меняет прежний результат и возвращает 130. Автоматическое продолжение эпизода не реализовано.
 
-Версии кода, данных и модели, split, конфиги и MLflow-прогоны фиксирует runner. MLflow и пакетное возобновление остаются следующими интеграциями. Автономный SQLite FTS5-поиск и адаптер к текущему SearchBackend описаны в [SEARCH_BACKEND.md](SEARCH_BACKEND.md); реальные наборы данных подключаются отдельно.
+Версии кода, данных и модели, split, конфиги и MLflow-прогоны фиксирует runner. MLflow и пакетное возобновление остаются следующими интеграциями. Go-сервис с SQLite FTS5, HTTP API v1 и Python-клиентом к текущему SearchBackend описаны в [SEARCH_BACKEND.md](SEARCH_BACKEND.md); реальные наборы данных подключаются отдельно.
 
 ## SQL + RAG: синтетический пример
 

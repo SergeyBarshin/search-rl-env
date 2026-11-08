@@ -1,47 +1,46 @@
-"""Загрузка JSONL, поиск и чтение без модели; команды описаны в README."""
+"""Вызовы отдельного Go-сервиса: поиск, чтение и эпизод с моковой моделью."""
 
 import argparse
 import asyncio
-from dataclasses import asdict
 import json
-from pathlib import Path
 
-from search_rl_env.search import Document, LocalSearch, SearchError, build_snapshot
-
-
-def documents(path):
-    with Path(path).open(encoding="utf-8") as stream:
-        for line in stream:
-            if line.strip():
-                yield Document(**json.loads(line))
+from search_rl_env.search import SearchClient, SearchError
 
 
 async def execute(args):
-    async with LocalSearch(args.snapshot) as backend:
+    async with SearchClient(args.url) as search:
+        manifest = search.manifest
         if args.command == "search":
-            return asdict(await backend.search(args.query, limit=args.limit))
+            hits = await search.search(args.query, corpus_id=manifest["corpus_id"],
+                                       corpus_revision=manifest["corpus_revision"], limit=args.limit)
+            return {"manifest": manifest, "hits": [hit.model_dump() for hit in hits]}
+        if args.command == "read":
+            return (await search.read(doc_id=args.doc_id, chunk_id=args.chunk_id,
+                                      offset=args.offset, limit=args.limit)).model_dump()
         if args.command == "chunks":
-            return await backend.list_chunks(args.doc_id, offset=args.offset, limit=args.limit)
-        method = backend.read_chunk if args.chunk_id else backend.read_document
-        return asdict(await method(args.chunk_id or args.doc_id, offset=args.offset, limit=args.limit))
+            return (await search.chunks(args.doc_id, offset=args.offset, limit=args.limit)).model_dump()
+        from search_rl_env.agent import run_episode
+        from search_rl_env.agent.mocks import MockModel
+        from search_rl_env.contracts import AgentTask, EpisodeConfig
+
+        task = AgentTask(task_id="go-search-demo", question=args.query, language="ru",
+                         corpus_id=manifest["corpus_id"], corpus_revision=manifest["corpus_revision"])
+        result = await run_episode(task, MockModel(), search, EpisodeConfig(max_steps=4))
+        return {"manifest": manifest, "stop_reason": result.stop_reason.value,
+                "selected_document_ids": result.selected_document_ids, "search_calls": result.search_calls}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--url", default="http://127.0.0.1:8090")
     commands = parser.add_subparsers(dest="command", required=True)
-    build = commands.add_parser("build")
-    build.add_argument("--input", type=Path, default=Path(__file__).parent / "fixtures/corpus.jsonl")
-    build.add_argument("--output", type=Path, default=Path("indexes/demo.sqlite"))
-    build.add_argument("--corpus-id", default="synthetic-demo")
-    build.add_argument("--revision", default=None)
-    build.add_argument("--chunk-chars", type=int, default=2000)
-    for command in ("search", "read", "chunks"):
+    for command in ("search", "read", "chunks", "episode"):
         subparser = commands.add_parser(command)
-        subparser.add_argument("--snapshot", type=Path, default=Path("indexes/demo.sqlite"))
-        subparser.add_argument("--limit", type=int, default=10 if command != "read" else 8000)
-        if command == "search":
+        if command in {"search", "episode"}:
             subparser.add_argument("--query", required=True)
-        else:
+        if command != "episode":
+            subparser.add_argument("--limit", type=int, default=8000 if command == "read" else 10)
+        if command in {"read", "chunks"}:
             subparser.add_argument("--offset", type=int, default=0)
             if command == "read":
                 identifiers = subparser.add_mutually_exclusive_group(required=True)
@@ -51,13 +50,9 @@ def main():
                 subparser.add_argument("--doc-id", required=True)
     args = parser.parse_args()
     try:
-        if args.command == "build":
-            result = build_snapshot(documents(args.input), args.output, corpus_id=args.corpus_id,
-                                    corpus_revision=args.revision, chunk_chars=args.chunk_chars)
-        else:
-            result = asyncio.run(execute(args))
-    except (SearchError, OSError, ValueError, TypeError) as error:
-        parser.exit(1, f"Ошибка: {type(error).__name__}. Проверьте вход и параметры.\n")
+        result = asyncio.run(execute(args))
+    except (SearchError, ValueError) as error:
+        parser.exit(1, f"Ошибка: {type(error).__name__}. Проверьте сервис и параметры.\n")
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

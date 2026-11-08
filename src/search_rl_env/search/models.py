@@ -1,10 +1,11 @@
-"""Локальные типы поиска; не меняют контракт инструментов агента."""
+"""HTTP-контракт Go-сервиса; индексация и SQLite находятся в Go."""
 
-from dataclasses import dataclass
+from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SearchError(Exception):
-    """Ошибка с безопасным сообщением без исходного запроса и путей."""
+    """Безопасное сообщение без URL, тела ответа и текста запроса."""
 
 
 class InvalidRequest(SearchError):
@@ -15,11 +16,7 @@ class UnknownId(SearchError):
     pass
 
 
-class SnapshotConflict(SearchError):
-    pass
-
-
-class StorageError(SearchError):
+class SearchBusy(SearchError):
     pass
 
 
@@ -27,63 +24,82 @@ class SearchTimeout(SearchError):
     pass
 
 
-class SearchBusy(SearchError):
+class StorageError(SearchError):
     pass
 
 
-@dataclass(frozen=True)
-class Document:
-    doc_id: str
-    text: str
-    title: str = ""
-    language: str = "und"
+class SearchProtocolError(SearchError):
+    pass
 
 
-@dataclass(frozen=True)
-class Match:
-    doc_id: str
+class WireModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+
+
+class ServiceConfig(WireModel):
+    max_results: int = Field(ge=1)
+    snippet_chars: int = Field(ge=1)
+    max_read_chars: int = Field(ge=1)
+    max_query_chars: int = Field(ge=1)
+    max_query_terms: int = Field(ge=1)
+    workers: int = Field(ge=1)
+    max_pending: int = Field(ge=1)
+    timeout_nanoseconds: int = Field(ge=1)
+
+
+class Manifest(WireModel):
+    schema_version: Literal[2]
+    corpus_id: str = Field(min_length=1)
+    corpus_revision: str = Field(min_length=1)
+    content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    chunk_chars: int = Field(ge=1)
+    chunk_algorithm: Literal["chars-v1"]
+    documents: int = Field(ge=1)
+    index_algorithm: Literal["go-fts5-unicode61-document-bm25-v1"]
+    sqlite_version: str = Field(min_length=1)
+    driver_version: str = Field(min_length=1)
+    index_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    api_version: Literal["1"]
+    search_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    config: ServiceConfig
+
+
+class Versions(WireModel):
+    corpus_id: str = Field(min_length=1)
+    corpus_revision: str = Field(min_length=1)
+    index_revision: str = Field(min_length=1)
+    search_revision: str = Field(min_length=1)
+
+
+class Match(WireModel):
+    doc_id: str = Field(min_length=1)
     snippet: str
-    rank: int
+    rank: int = Field(ge=1)
     score: float
 
 
-@dataclass(frozen=True)
-class SearchResult:
-    hits: tuple[Match, ...]
-    corpus_revision: str
-    index_revision: str
-    search_revision: str
+class SearchResult(Versions):
+    hits: list[Match]
 
 
-@dataclass(frozen=True)
-class TextResult:
-    doc_id: str
+class TextResult(Versions):
+    doc_id: str = Field(min_length=1)
     chunk_id: str | None
     text: str
-    offset: int
-    next_offset: int | None
-    total_chars: int
-    corpus_revision: str
+    offset: int = Field(ge=0)
+    next_offset: int | None = Field(ge=0)
+    total_chars: int = Field(ge=0)
 
 
-@dataclass(frozen=True)
-class SearchConfig:
-    max_results: int = 100
-    snippet_chars: int = 500
-    max_read_chars: int = 8000
-    max_query_chars: int = 2000
-    max_query_terms: int = 32
-    workers: int = 4
-    max_pending: int = 32
-    timeout_seconds: float = 5.0
+class ChunksResult(Versions):
+    chunk_ids: list[str]
+    next_offset: int | None = Field(ge=0)
 
-    def __post_init__(self):
-        import math
 
-        for name in self.__dataclass_fields__:
-            value = getattr(self, name)
-            if name == "timeout_seconds":
-                if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
-                    raise ValueError("timeout_seconds должен быть конечным положительным числом.")
-            elif isinstance(value, bool) or not isinstance(value, int) or value < 1:
-                raise ValueError(f"{name} должен быть положительным целым числом.")
+class ErrorBody(WireModel):
+    code: str
+    message: str
+
+
+class ErrorEnvelope(WireModel):
+    error: ErrorBody

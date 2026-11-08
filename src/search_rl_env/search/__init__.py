@@ -1,10 +1,8 @@
-"""Автономное хранение и поиск без моделей и сетевых сервисов."""
+"""Python-клиент отдельного поискового сервиса на Go."""
 
-from .backend import HarnessSearch, LocalSearch
-from .models import (Document, InvalidRequest, SearchBusy, SearchConfig, SearchError,
-                     SearchTimeout, SnapshotConflict, StorageError, UnknownId)
-from .snapshot import build_snapshot
+from .client import SearchClient
+from .models import (InvalidRequest, SearchBusy, SearchError, SearchProtocolError,
+                     SearchTimeout, StorageError, UnknownId)
 
-__all__ = ["Document", "HarnessSearch", "LocalSearch", "SearchConfig", "SearchError",
-           "InvalidRequest", "SearchBusy", "SearchTimeout", "SnapshotConflict",
-           "StorageError", "UnknownId", "build_snapshot"]
+__all__ = ["SearchClient", "SearchError", "InvalidRequest", "UnknownId", "SearchBusy",
+           "SearchTimeout", "StorageError", "SearchProtocolError"]

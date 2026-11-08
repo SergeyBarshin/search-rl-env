@@ -1,0 +1,109 @@
+// Команда сборки корпуса и запуска отдельного поискового сервиса.
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/SergeyBarshin/search-rl-env/services/search/internal/search"
+)
+
+func run(ctx context.Context, args []string) error {
+	if len(args) == 0 {
+		return &search.Error{Code: "invalid_request", Message: "Используйте build или serve."}
+	}
+	switch args[0] {
+	case "build":
+		flags := flag.NewFlagSet("build", flag.ContinueOnError)
+		input := flags.String("input", "examples/fixtures/corpus.jsonl", "JSONL с документами")
+		output := flags.String("output", "indexes/demo-go.sqlite", "Файл нового снимка")
+		corpus := flags.String("corpus-id", "synthetic-demo", "Id корпуса")
+		revision := flags.String("revision", "", "Ревизия источника; по умолчанию хеш")
+		chunkChars := flags.Int("chunk-chars", 2000, "Размер фрагмента в символах")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return &search.Error{Code: "invalid_request", Message: "Неожиданные аргументы."}
+		}
+		file, err := os.Open(*input)
+		if err != nil {
+			return &search.Error{Code: "invalid_request", Message: "Не удалось открыть входной JSONL."}
+		}
+		defer file.Close()
+		manifest, err := search.Build(ctx, file, *output, *corpus, *revision, *chunkChars)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(manifest)
+	case "serve":
+		flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+		snapshot := flags.String("snapshot", "indexes/demo-go.sqlite", "Готовый снимок")
+		listen := flags.String("listen", "127.0.0.1:8090", "HTTP-адрес")
+		config := search.DefaultConfig()
+		flags.IntVar(&config.Workers, "workers", config.Workers, "Одновременные операции с SQLite")
+		flags.IntVar(&config.MaxPending, "max-pending", config.MaxPending, "Выполняемые и ожидающие операции суммарно")
+		flags.DurationVar(&config.Timeout, "timeout", config.Timeout, "Deadline операции с очередью")
+		flags.IntVar(&config.MaxResults, "max-results", config.MaxResults, "Максимум результатов")
+		flags.IntVar(&config.SnippetChars, "snippet-chars", config.SnippetChars, "Максимум символов сниппета")
+		flags.IntVar(&config.MaxReadChars, "max-read-chars", config.MaxReadChars, "Максимум символов чтения")
+		flags.IntVar(&config.MaxQueryChars, "max-query-chars", config.MaxQueryChars, "Максимум символов запроса")
+		flags.IntVar(&config.MaxQueryTerms, "max-query-terms", config.MaxQueryTerms, "Максимум терминов запроса")
+		if err := flags.Parse(args[1:]); err != nil {
+			return err
+		}
+		if flags.NArg() != 0 {
+			return &search.Error{Code: "invalid_request", Message: "Неожиданные аргументы."}
+		}
+		logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+		service, err := search.Open(ctx, *snapshot, config, logger)
+		if err != nil {
+			return err
+		}
+		defer service.Close()
+		listener, err := net.Listen("tcp", *listen)
+		if err != nil {
+			return &search.Error{Code: "storage_error", Message: "Не удалось открыть HTTP-порт."}
+		}
+		defer listener.Close()
+		server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.Timeout, WriteTimeout: config.Timeout + time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024,
+			BaseContext: func(net.Listener) context.Context { return ctx }}
+		logger.Info("search_ready", "address", listener.Addr().String(), "manifest", service.Info())
+		done := make(chan error, 1)
+		go func() { done <- server.Serve(listener) }()
+		select {
+		case err := <-done:
+			if !errors.Is(err, http.ErrServerClosed) {
+				return err
+			}
+		case <-ctx.Done():
+			shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := server.Shutdown(shutdown); err != nil {
+				server.Close()
+			}
+			<-done
+		}
+		return nil
+	default:
+		return &search.Error{Code: "invalid_request", Message: "Неизвестная команда; используйте build или serve."}
+	}
+}
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if err := run(ctx, os.Args[1:]); err != nil {
+		fmt.Fprintln(os.Stderr, search.SafeError(err))
+		os.Exit(1)
+	}
+}
