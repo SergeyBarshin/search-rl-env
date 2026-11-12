@@ -3,7 +3,7 @@
 Первая версия участка Димы: отдельный Go-сервис загружает корпус, хранит снимки,
 индексирует документы и предоставляет HTTP API. Python-клиент реализует существующий
 `SearchBackend` Сергея. Рабочий масштаб — тысячи RU/EN-документов и 16 параллельных
-эпизодов. SQL, инструменты агента и оценщики не меняются. Стандартный UI пока использует моки.
+эпизодов. Для одной HyDRA-задачи добавлен опциональный read-only SQL API; инструменты агента и оценщики сохраняют прежние контракты. Стандартный UI пока использует моки.
 
 ```text
 JSONL → Go build → SQLite FTS5-снимок
@@ -20,21 +20,20 @@ SQLite включена в бинарник. Сборка без CGO и сист
 
 ```bash
 go -C services/search build -o ../../build/search-service ./cmd/search
-./build/search-service build -input examples/fixtures/corpus.jsonl \
-  -output indexes/demo-go.sqlite -corpus-id synthetic-demo -revision demo-go-v1
-./build/search-service serve -snapshot indexes/demo-go.sqlite -listen 127.0.0.1:8090
+./build/search-service build
+./build/search-service serve -snapshot indexes/hydra.sqlite -listen 127.0.0.1:8090
 ```
 
 В другом терминале, после установки Python-пакета:
 
 ```bash
-.venv/bin/python examples/run_search.py search --query 'перенесён'
-.venv/bin/python examples/run_search.py read --doc-id doc-001
-.venv/bin/python examples/run_search.py chunks --doc-id doc-001
-.venv/bin/python examples/run_search.py episode --query 'перенесён'
+.venv/bin/python examples/run_search.py search --query 'Toronto Arenas'
+.venv/bin/python examples/run_search.py read --doc-id 14900050
+.venv/bin/python examples/run_search.py chunks --doc-id 14900050
+.venv/bin/python examples/run_search.py episode --query 'Toronto Arenas'
 ```
 
-Ожидается `doc-001`, исходный текст и законченный эпизод MockModel с этим id.
+Ожидаются KILT passage ids, исходный текст и законченный retrieval-эпизод MockModel. Полный SQL/search replay одной реальной задачи — в [HYDRA_PILOT.md](HYDRA_PILOT.md).
 Другой адрес: `examples/run_search.py --url http://127.0.0.1:8091 search --query ...`.
 Ctrl+C/SIGTERM отменяет активные запросы, останавливает HTTP и закрывает пул SQLite.
 Для другого корпуса задайте свой JSONL и новый путь снимка.

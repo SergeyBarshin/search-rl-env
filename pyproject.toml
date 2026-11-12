@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<10", "pytest-asyncio>=0.25,<2"]
+hydra = ["faiss-cpu>=1.12,<2", "onnxruntime>=1.22,<2", "tokenizers>=0.21,<1", "pyarrow>=18,<25", "fsspec>=2025.3"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/search_rl_env"]

@@ -6,12 +6,13 @@ import math
 import httpx
 from pydantic import ValidationError
 
-from search_rl_env.contracts import SearchHit
+from search_rl_env.contracts import SearchHit, SqlQueryError, SqlResult
 from .models import (ChunksResult, ErrorEnvelope, InvalidRequest, Manifest, SearchBusy,
                      SearchProtocolError, SearchResult, SearchTimeout, StorageError,
-                     TextResult, UnknownId)
+                     TextResult, UnknownId, SQLInfo, SQLResponse)
 
 ERRORS = {
+    "sql_query_error": (400, SqlQueryError, "SQL не разрешён или превышает ограничения SQLite."),
     "invalid_request": (400, InvalidRequest, "Недопустимый запрос к поиску."),
     "unknown_id": (404, UnknownId, "Неизвестный корпус, ревизия или идентификатор."),
     "busy": (503, SearchBusy, "Очередь поискового сервиса заполнена."),
@@ -148,3 +149,44 @@ class SearchClient:
         if result.next_offset is not None and (result.next_offset != offset + len(result.chunk_ids) or len(result.chunk_ids) != limit):
             raise SearchProtocolError("Неверное продолжение страницы фрагментов.")
         return result
+
+
+class SQLClient:
+    """SqlBackend для исходной SQLite-базы в том же Go-сервисе."""
+
+    def __init__(self, base_url: str, **kwargs):
+        self._transport = SearchClient(base_url, **kwargs)
+        self._info = None
+
+    async def __aenter__(self):
+        try:
+            self._info = await self._transport._request("GET", "/v1/sql/schema", SQLInfo)
+        except BaseException:
+            await self._transport.aclose()
+            raise
+        return self
+
+    async def __aexit__(self, *exc):
+        await self._transport.aclose()
+
+    @property
+    def schema(self) -> str:
+        if self._info is None:
+            raise SearchProtocolError("Сначала откройте SQLClient через async with.")
+        return self._info.schema_
+
+    @property
+    def info(self) -> dict:
+        if self._info is None:
+            raise SearchProtocolError("Сначала откройте SQLClient через async with.")
+        return self._info.model_dump(by_alias=True)
+
+    async def query(self, query: str) -> SqlResult:
+        if self._info is None:
+            raise SearchProtocolError("Сначала откройте SQLClient через async with.")
+        response = await self._transport._request("POST", "/v1/sql", SQLResponse, {
+            "db_id": self._info.db_id, "db_revision": self._info.db_revision, "query": query,
+        })
+        if response.db_id != self._info.db_id or response.db_revision != self._info.db_revision:
+            raise SearchProtocolError("SQL-база изменилась во время прогона.")
+        return SqlResult(columns=response.columns, rows=response.rows, truncated=response.truncated)

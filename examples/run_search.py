@@ -23,7 +23,7 @@ async def execute(args):
         from search_rl_env.agent.mocks import MockModel
         from search_rl_env.contracts import AgentTask, EpisodeConfig
 
-        task = AgentTask(task_id="go-search-demo", question=args.query, language="ru",
+        task = AgentTask(task_id="go-search-demo", question=args.query, language=args.language,
                          corpus_id=manifest["corpus_id"], corpus_revision=manifest["corpus_revision"])
         result = await run_episode(task, MockModel(), search, EpisodeConfig(max_steps=4))
         return {"manifest": manifest, "stop_reason": result.stop_reason.value,
@@ -38,6 +38,8 @@ def main():
         subparser = commands.add_parser(command)
         if command in {"search", "episode"}:
             subparser.add_argument("--query", required=True)
+        if command == "episode":
+            subparser.add_argument("--language", default="en")
         if command != "episode":
             subparser.add_argument("--limit", type=int, default=8000 if command == "read" else 10)
         if command in {"read", "chunks"}:

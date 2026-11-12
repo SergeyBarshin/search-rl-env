@@ -25,9 +25,9 @@ func run(ctx context.Context, args []string) error {
 	switch args[0] {
 	case "build":
 		flags := flag.NewFlagSet("build", flag.ContinueOnError)
-		input := flags.String("input", "examples/fixtures/corpus.jsonl", "JSONL с документами")
-		output := flags.String("output", "indexes/demo-go.sqlite", "Файл нового снимка")
-		corpus := flags.String("corpus-id", "synthetic-demo", "Id корпуса")
+		input := flags.String("input", "examples/fixtures/hydra/corpus.jsonl", "JSONL с документами")
+		output := flags.String("output", "indexes/hydra.sqlite", "Файл нового снимка")
+		corpus := flags.String("corpus-id", "hydra-a2s4-kilt-pilot", "Id корпуса")
 		revision := flags.String("revision", "", "Ревизия источника; по умолчанию хеш")
 		chunkChars := flags.Int("chunk-chars", 2000, "Размер фрагмента в символах")
 		if err := flags.Parse(args[1:]); err != nil {
@@ -48,8 +48,10 @@ func run(ctx context.Context, args []string) error {
 		return json.NewEncoder(os.Stdout).Encode(manifest)
 	case "serve":
 		flags := flag.NewFlagSet("serve", flag.ContinueOnError)
-		snapshot := flags.String("snapshot", "indexes/demo-go.sqlite", "Готовый снимок")
+		snapshot := flags.String("snapshot", "indexes/hydra.sqlite", "Готовый снимок")
 		listen := flags.String("listen", "127.0.0.1:8090", "HTTP-адрес")
+		sqlSnapshot := flags.String("sql-snapshot", "", "Необязательная исходная SQLite-база для SQL-тулы")
+		dbID := flags.String("db-id", "", "Id исходной SQL-базы")
 		config := search.DefaultConfig()
 		flags.IntVar(&config.Workers, "workers", config.Workers, "Одновременные операции с SQLite")
 		flags.IntVar(&config.MaxPending, "max-pending", config.MaxPending, "Выполняемые и ожидающие операции суммарно")
@@ -71,12 +73,23 @@ func run(ctx context.Context, args []string) error {
 			return err
 		}
 		defer service.Close()
+		var sqlStore *search.SQLStore
+		if *sqlSnapshot != "" || *dbID != "" {
+			if *sqlSnapshot == "" || *dbID == "" {
+				return &search.Error{Code: "invalid_request", Message: "Нужны оба флага sql-snapshot и db-id."}
+			}
+			sqlStore, err = search.OpenSQL(ctx, *sqlSnapshot, *dbID, config.Workers)
+			if err != nil {
+				return err
+			}
+			defer sqlStore.Close()
+		}
 		listener, err := net.Listen("tcp", *listen)
 		if err != nil {
 			return &search.Error{Code: "storage_error", Message: "Не удалось открыть HTTP-порт."}
 		}
 		defer listener.Close()
-		server := &http.Server{Handler: service.Handler(), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.Timeout, WriteTimeout: config.Timeout + time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024,
+		server := &http.Server{Handler: service.HandlerWithSQL(sqlStore), ReadHeaderTimeout: 5 * time.Second, ReadTimeout: config.Timeout, WriteTimeout: config.Timeout + time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 16 * 1024,
 			BaseContext: func(net.Listener) context.Context { return ctx }}
 		logger.Info("search_ready", "address", listener.Addr().String(), "manifest", service.Info())
 		done := make(chan error, 1)

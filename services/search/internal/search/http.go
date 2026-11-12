@@ -2,6 +2,8 @@ package search
 
 import (
 	"bytes"
+	"context"
+	"database/sql"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -16,7 +18,7 @@ func writeError(w http.ResponseWriter, err error) {
 	safe := SafeError(err)
 	status := http.StatusInternalServerError
 	switch safe.Code {
-	case "invalid_request":
+	case "invalid_request", "sql_query_error":
 		status = http.StatusBadRequest
 	case "unknown_id":
 		status = http.StatusNotFound
@@ -52,7 +54,32 @@ func decodeRequest(w http.ResponseWriter, r *http.Request, destination any) erro
 
 // Handler не зависит от адреса listener; тестируется через httptest.
 func (s *Service) Handler() http.Handler {
+	return s.HandlerWithSQL(nil)
+}
+
+func (s *Service) HandlerWithSQL(sqlStore *SQLStore) http.Handler {
 	mux := http.NewServeMux()
+	if sqlStore != nil {
+		mux.HandleFunc("GET /v1/sql/schema", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, sqlStore.Info()) })
+		mux.HandleFunc("POST /v1/sql", func(w http.ResponseWriter, r *http.Request) {
+			var request SQLRequest
+			if err := decodeRequest(w, r, &request); err != nil {
+				writeError(w, err)
+				return
+			}
+			var result SQLResult
+			err := s.execute(r.Context(), "sql", func(ctx context.Context, _ *sql.Conn) (int, error) {
+				var err error
+				result, err = sqlStore.Query(ctx, request)
+				return len(result.Rows), err
+			})
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, 200, result)
+		})
+	}
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if !s.Healthy() {
 			writeError(w, failure("storage_error", "Снимок недоступен."))

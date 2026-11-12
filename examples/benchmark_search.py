@@ -18,7 +18,7 @@ def positive(value):
 
 
 async def measure(args):
-    queries = args.query or ["перенесён", "release", "notincorpus"]
+    queries = args.query or ["Toronto Arenas", "suspend operations", "notincorpus"]
     async with SearchClient(args.url) as search:
         manifest = search.manifest
         async def query(text):

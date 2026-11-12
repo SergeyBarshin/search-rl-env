@@ -183,49 +183,49 @@ git diff --check
 
 Тесты покрывают несколько поисков по решению модели, нормальное завершение, бюджеты, повторы id, неизвестные документы, исправление ошибочных действий, сбои, JSON-сохранение и воспроизведение. HTTP-вызовы OpenRouter проверяются через `httpx.MockTransport`, без сети. Точные интерфейсы для поиска Димы и runner Коли — в [CONTRACTS.md](docs/CONTRACTS.md).
 
-## Поисковый сервис на Go
+## Реальный пример HyDRA: SQL и поиск
 
-Хранение, индексация, поиск и чтение находятся в `services/search/`.
-Python `SearchClient` подключает HTTP-сервис к существующему SearchBackend.
-Стандартные CLI/UI харнесса пока используют моки. Архитектура и полный HTTP API —
-в [SEARCH_BACKEND.md](docs/SEARCH_BACKEND.md).
-
-Нужен Go 1.25+. Из корня репозитория:
+Основной интеграционный пример использует train-задачу `train_a2s_4` из
+[HyDRA-Bench](https://huggingface.co/datasets/Snowflake/HyDRA-Bench), исходную
+BIRD-базу hockey и 999 настоящих KILT-фрагментов. SQL возвращает `Toronto Arenas`,
+поиск на той же задаче проверяется через Go BM25 и опциональный FAISS/RRF.
+Подробности и ограничения — в [HYDRA_PILOT.md](docs/HYDRA_PILOT.md).
 
 ```bash
+python -m pip install -e '.[dev,hydra]'
+python examples/prepare_hydra.py --with-vectors
 go -C services/search build -o ../../build/search-service ./cmd/search
-./build/search-service build -input examples/fixtures/corpus.jsonl \
-  -output indexes/demo-go.sqlite -corpus-id synthetic-demo -revision demo-go-v1
-./build/search-service serve -snapshot indexes/demo-go.sqlite -listen 127.0.0.1:8090
+./build/search-service build
+./build/search-service serve -sql-snapshot data/hydra/hockey.sqlite -db-id hockey
 ```
 
-В другом терминале после установки Python-пакета:
+В другом терминале:
 
 ```bash
-python examples/run_search.py search --query 'перенесён'
-python examples/run_search.py read --doc-id doc-001
-python examples/run_search.py chunks --doc-id doc-001
-python examples/run_search.py episode --query 'перенесён'
+python examples/run_hydra.py --with-vectors
 ```
 
-Ожидается `doc-001`, исходный текст и завершённый эпизод MockModel. Модель и GPU
-не нужны. Go-драйвер включает SQLite; CGO и системная библиотека не требуются.
-Старый Python-снимок несовместим: пересоберите JSONL в новый `demo-go.sqlite`.
-Новые данные требуют нового пути снимка; повторная идентичная сборка безопасна.
-Корпуса, индексы и бинарники исключены из Git.
+Это воспроизведение тулов с эталонным SQL, без модели агента. Данные проверки
+не передаются в поисковый индекс. Все три варианта нашли фрагменты нужной статьи
+в top-10 на выбранном срезе; это не официальный score полного HyDRA и не доказательство
+превосходства одного метода. Компактный ONNX-энкодер работает на CPU, платных API нет.
+
+Корпус для Go-команды build по умолчанию — `examples/fixtures/hydra/corpus.jsonl`,
+снимок — `indexes/hydra.sqlite`. Старые синтетические примеры остаются только
+для unit-тестов и прежних моковых CLI/UI. Без векторов можно использовать основную
+установку проекта и команды без `--with-vectors`.
+
+Обычный поиск и чтение доступны через `examples/run_search.py`; например,
+`python examples/run_search.py search --query 'Toronto Arenas'`.
+Архитектура HTTP-сервиса — в [SEARCH_BACKEND.md](docs/SEARCH_BACKEND.md),
+источники данных и атрибуция — в [ATTRIBUTION.md](examples/fixtures/hydra/ATTRIBUTION.md).
 
 ```bash
 go -C services/search test -race ./...
 go -C services/search vet ./...
 python -m pytest -q
-python examples/benchmark_search.py --concurrency 16 \
-  --output runs/search-benchmark/go-http.json
 git diff --check
 ```
-
-HTTP-замер работает с запущенным сервисом. Манифест, ошибки и p50/p95 включают
-поисковую конфигурацию и транспорт. Go-бенчмарк на искусственных корпусах 1/10 тысяч
-документов описан в SEARCH_BACKEND.md. Качество на реальных данных ещё не проверено.
 
 ## Первый совместный результат
 

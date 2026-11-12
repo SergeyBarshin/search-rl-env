@@ -12,7 +12,7 @@ import pytest
 from search_rl_env.agent import RolloutRunner
 from search_rl_env.agent.mocks import MockModel
 from search_rl_env.contracts import AgentTask, EpisodeConfig
-from search_rl_env.search import SearchClient, UnknownId
+from search_rl_env.search import SearchClient, SQLClient, UnknownId
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -30,14 +30,22 @@ def go_binary(tmp_path_factory):
 
 
 @pytest.fixture
-def go_service(go_binary, tmp_path):
+def go_service(go_binary, tmp_path, request):
     snapshot = tmp_path / "corpus.sqlite"
-    subprocess.run([str(go_binary), "build", "-input", str(ROOT / "examples/fixtures/corpus.jsonl"),
-                    "-output", str(snapshot), "-corpus-id", "integration", "-chunk-chars", "17"],
+    hydra = getattr(request, "param", None) == "hydra"
+    source = ROOT / "examples/fixtures/hydra/corpus.jsonl" if hydra else ROOT / "examples/fixtures/corpus.jsonl"
+    if hydra and not (ROOT / "data/hydra/hockey.sqlite").exists():
+        pytest.skip("Для настоящего SQL replay выполните examples/prepare_hydra.py.")
+    corpus = "hydra-a2s4-kilt-pilot" if hydra else "integration"
+    subprocess.run([str(go_binary), "build", "-input", str(source),
+                    "-output", str(snapshot), "-corpus-id", corpus, "-chunk-chars", "17"],
                    check=True, capture_output=True, timeout=20)
     log = tmp_path / "service.jsonl"
     with log.open("wb") as stream:
-        process = subprocess.Popen([str(go_binary), "serve", "-snapshot", str(snapshot), "-listen", "127.0.0.1:0"],
+        command = [str(go_binary), "serve", "-snapshot", str(snapshot), "-listen", "127.0.0.1:0"]
+        if hydra:
+            command += ["-sql-snapshot", str(ROOT / "data/hydra/hockey.sqlite"), "-db-id", "hockey"]
+        process = subprocess.Popen(command,
                                    stdout=subprocess.DEVNULL, stderr=stream)
     try:
         deadline = time.monotonic() + 10
@@ -94,3 +102,20 @@ async def test_sixteen_harness_episodes_use_go_service(go_service):
                 return result.episode_id
             ids = await asyncio.gather(*(episode(index) for index in range(16)))
             assert len(set(ids)) == 16
+
+
+@pytest.mark.parametrize("go_service", ["hydra"], indirect=True)
+async def test_real_hydra_sql_and_search_use_same_task(go_service):
+    reference = json.loads((ROOT / "examples/fixtures/hydra/reference.json").read_text())
+    provenance = json.loads((ROOT / "examples/fixtures/hydra/provenance.json").read_text())
+    async with SearchClient(go_service) as search, SQLClient(go_service) as sql:
+        assert sql.info["db_revision"] == provenance["sql_database"]["sha256"]
+        results = await asyncio.gather(*(sql.query(reference["sql_query"]) for _ in range(16)))
+        assert all(result.rows == reference["expected_rows"] and not result.truncated for result in results)
+        result = results[0]
+        assert result.columns == reference["expected_columns"]
+        assert result.rows == reference["expected_rows"]
+        assert not result.truncated
+        hits = await search.search("Toronto Arenas suspending operations 1918 1919",
+                                   corpus_id="hydra-a2s4-kilt-pilot", corpus_revision=None, limit=10)
+        assert {hit.doc_id for hit in hits} & set(provenance["manual_reference_doc_ids"])

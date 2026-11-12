@@ -2,6 +2,7 @@
 
 from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
+from search_rl_env.contracts import SqlResult
 
 
 class SearchError(Exception):
@@ -103,3 +104,14 @@ class ErrorBody(WireModel):
 
 class ErrorEnvelope(WireModel):
     error: ErrorBody
+
+
+class SQLInfo(WireModel):
+    db_id: str = Field(min_length=1)
+    db_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    schema_: str = Field(alias="schema", min_length=1)
+
+
+class SQLResponse(SqlResult):
+    db_id: str = Field(min_length=1)
+    db_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
