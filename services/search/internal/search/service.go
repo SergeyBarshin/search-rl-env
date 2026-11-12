@@ -51,13 +51,31 @@ func Open(ctx context.Context, path string, config Config, logger *slog.Logger) 
 	return &Service{db: db, path: path, file: file, manifest: manifest, config: config, versions: versions,
 		pending: make(chan struct{}, config.MaxPending), slots: make(chan struct{}, config.Workers), logger: logger}, nil
 }
-func (s *Service) Close() error { s.closed.Store(true); return s.db.Close() }
-func (s *Service) Info() Info   { return Info{s.manifest, "1", s.versions.SearchRevision, s.config} }
+func NewSQLService(config Config, logger *slog.Logger) (*Service, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
+	return &Service{config: config, pending: make(chan struct{}, config.MaxPending), slots: make(chan struct{}, config.Workers), logger: logger}, nil
+}
+func (s *Service) Close() error {
+	s.closed.Store(true)
+	if s.db == nil {
+		return nil
+	}
+	return s.db.Close()
+}
+func (s *Service) Info() Info { return Info{s.manifest, "1", s.versions.SearchRevision, s.config} }
 func (s *Service) Healthy() bool {
+	if s.db == nil {
+		return !s.closed.Load()
+	}
 	file, err := os.Stat(s.path)
 	return !s.closed.Load() && err == nil && os.SameFile(s.file, file) && file.Size() == s.file.Size() && file.ModTime().Equal(s.file.ModTime())
 }
 func (s *Service) checkScope(scope Scope) error {
+	if s.db == nil {
+		return failure("unknown_id", "Поиск не настроен в SQL-only сервисе.")
+	}
 	if scope.CorpusID != s.manifest.CorpusID || (scope.CorpusRevision != nil && *scope.CorpusRevision != s.manifest.CorpusRevision) {
 		return failure("unknown_id", "Неизвестный корпус или ревизия.")
 	}
@@ -116,10 +134,23 @@ func (s *Service) execute(ctx context.Context, name string, operation func(conte
 			if err != nil {
 				status = SafeError(err).Code
 			}
+			var corpusID, corpusRevision, indexRevision, searchRevision any
+			var dbID, dbRevision any
+			if database, ok := ctx.Value(sqlScopeKey{}).(SQLDatabase); ok {
+				dbID = database.DBID
+				dbRevision = database.DBRevision
+			}
+			if s.db != nil {
+				corpusID = s.versions.CorpusID
+				corpusRevision = s.versions.CorpusRevision
+				indexRevision = s.versions.IndexRevision
+				searchRevision = s.versions.SearchRevision
+			}
 			s.logger.Info("search_operation", "operation", name, "status", status, "duration_seconds", time.Since(started).Seconds(),
 				"queue_seconds", queueSeconds, "execution_seconds", executionSeconds, "result_count", count,
-				"corpus_id", s.versions.CorpusID, "corpus_revision", s.versions.CorpusRevision,
-				"index_revision", s.versions.IndexRevision, "search_revision", s.versions.SearchRevision)
+				"corpus_id", corpusID, "corpus_revision", corpusRevision,
+				"index_revision", indexRevision, "search_revision", searchRevision,
+				"db_id", dbID, "db_revision", dbRevision)
 		}
 	}()
 	if s.closed.Load() {
@@ -146,18 +177,21 @@ func (s *Service) execute(ctx context.Context, name string, operation func(conte
 	if !s.Healthy() {
 		return failure("storage_error", "Снимок был изменён или сервис закрыт.")
 	}
-	conn, err := s.db.Conn(ctx)
-	if err != nil {
-		return operationError(ctx, err)
-	}
-	defer conn.Close()
-	// Проверка на том же соединении предотвращает незаметную смену ревизии в пуле.
-	var raw string
-	if err = conn.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='manifest'").Scan(&raw); err != nil {
-		return operationError(ctx, err)
-	}
-	if raw != string(canonical(s.manifest)) {
-		return failure("storage_error", "Манифест снимка изменился.")
+	var conn *sql.Conn
+	if s.db != nil {
+		conn, err = s.db.Conn(ctx)
+		if err != nil {
+			return operationError(ctx, err)
+		}
+		defer conn.Close()
+		// Проверка на том же соединении предотвращает незаметную смену ревизии в пуле.
+		var raw string
+		if err = conn.QueryRowContext(ctx, "SELECT value FROM metadata WHERE key='manifest'").Scan(&raw); err != nil {
+			return operationError(ctx, err)
+		}
+		if raw != string(canonical(s.manifest)) {
+			return failure("storage_error", "Манифест снимка изменился.")
+		}
 	}
 	count, err = operation(ctx, conn)
 	if ctx.Err() != nil {

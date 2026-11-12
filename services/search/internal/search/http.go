@@ -58,9 +58,23 @@ func (s *Service) Handler() http.Handler {
 }
 
 func (s *Service) HandlerWithSQL(sqlStore *SQLStore) http.Handler {
+	return s.HandlerWithRegistry(singleSQLRegistry(sqlStore))
+}
+
+func (s *Service) HandlerWithRegistry(registry *SQLRegistry) http.Handler {
 	mux := http.NewServeMux()
-	if sqlStore != nil {
-		mux.HandleFunc("GET /v1/sql/schema", func(w http.ResponseWriter, r *http.Request) { writeJSON(w, 200, sqlStore.Info()) })
+	if registry != nil && len(registry.stores) > 0 {
+		mux.HandleFunc("GET /v1/sql/databases", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, 200, map[string]any{"databases": registry.Databases()})
+		})
+		mux.HandleFunc("GET /v1/sql/schema", func(w http.ResponseWriter, r *http.Request) {
+			store, err := registry.Resolve(r.URL.Query().Get("db_id"), r.URL.Query().Get("db_revision"))
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			writeJSON(w, 200, store.Info())
+		})
 		mux.HandleFunc("POST /v1/sql", func(w http.ResponseWriter, r *http.Request) {
 			var request SQLRequest
 			if err := decodeRequest(w, r, &request); err != nil {
@@ -68,9 +82,17 @@ func (s *Service) HandlerWithSQL(sqlStore *SQLStore) http.Handler {
 				return
 			}
 			var result SQLResult
-			err := s.execute(r.Context(), "sql", func(ctx context.Context, _ *sql.Conn) (int, error) {
+			store, resolveErr := registry.Resolve(request.DBID, request.DBRevision)
+			queryContext := r.Context()
+			if resolveErr == nil {
+				queryContext = context.WithValue(queryContext, sqlScopeKey{}, SQLDatabase{store.info.DBID, store.info.DBRevision})
+			}
+			err := s.execute(queryContext, "sql", func(ctx context.Context, _ *sql.Conn) (int, error) {
+				if resolveErr != nil {
+					return 0, resolveErr
+				}
 				var err error
-				result, err = sqlStore.Query(ctx, request)
+				result, err = store.Query(ctx, request)
 				return len(result.Rows), err
 			})
 			if err != nil {
@@ -87,6 +109,9 @@ func (s *Service) HandlerWithSQL(sqlStore *SQLStore) http.Handler {
 		}
 		writeJSON(w, 200, map[string]string{"status": "ok"})
 	})
+	if s.db == nil {
+		return mux
+	}
 	mux.HandleFunc("GET /v1/manifest", func(w http.ResponseWriter, r *http.Request) {
 		if !s.Healthy() {
 			writeError(w, failure("storage_error", "Снимок недоступен."))

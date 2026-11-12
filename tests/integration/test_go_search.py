@@ -1,8 +1,10 @@
 import asyncio
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -10,9 +12,9 @@ import time
 import pytest
 
 from search_rl_env.agent import RolloutRunner
-from search_rl_env.agent.mocks import MockModel
+from search_rl_env.agent.mocks import MockModel, MockSearch
 from search_rl_env.contracts import AgentTask, EpisodeConfig
-from search_rl_env.search import SearchClient, SQLClient, UnknownId
+from search_rl_env.search import SearchClient, SQLClient, SQLClientPool, UnknownId
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -119,3 +121,99 @@ async def test_real_hydra_sql_and_search_use_same_task(go_service):
         hits = await search.search("Toronto Arenas suspending operations 1918 1919",
                                    corpus_id="hydra-a2s4-kilt-pilot", corpus_revision=None, limit=10)
         assert {hit.doc_id for hit in hits} & set(provenance["manual_reference_doc_ids"])
+
+
+@pytest.fixture
+def go_sql_backend(go_binary, tmp_path):
+    databases = []
+    for identifier in ["left", "right"]:
+        path = tmp_path / f"{identifier}.sqlite"
+        with sqlite3.connect(path) as db:
+            db.execute("CREATE TABLE routing_probe(value TEXT)")
+            db.execute("INSERT INTO routing_probe VALUES (?)", (identifier,))
+        databases.append({"db_id": identifier, "path": path.name,
+                          "revision": hashlib.sha256(path.read_bytes()).hexdigest()})
+    catalog = tmp_path / "catalog.json"
+    catalog.write_text(json.dumps({"version": 1, "databases": databases}))
+    log = tmp_path / "backend.jsonl"
+    with log.open("wb") as output:
+        process = subprocess.Popen([str(go_binary), "serve-sql", "-sql-catalog", str(catalog),
+                                    "-listen", "127.0.0.1:0"], cwd=tmp_path,
+                                   stdout=subprocess.DEVNULL, stderr=output)
+    try:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                pytest.fail("SQL-only backend failed: " + log.read_text())
+            lines = log.read_text().splitlines()
+            if lines:
+                ready = json.loads(lines[0])
+                if ready.get("msg") == "sql_ready":
+                    yield "http://" + ready["address"], databases
+                    return
+            time.sleep(0.01)
+        pytest.fail("SQL backend startup timeout")
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("concurrency", [16, 32, 64])
+async def test_sql_only_1000_requests_choose_own_database(go_sql_backend, concurrency):
+    url, expected = go_sql_backend
+    operations = iter(range(1000))
+    async with SQLClientPool(url, concurrency=concurrency) as pool:
+        catalog = await pool.databases()
+        assert catalog == [{"db_id": row["db_id"], "db_revision": row["revision"]} for row in expected]
+        bindings = [await pool.bind(row["db_id"], row["db_revision"]) for row in catalog]
+        completed = 0
+        async def worker():
+            nonlocal completed
+            for index in operations:
+                selected = index % 2
+                result = await bindings[selected].query("SELECT value FROM routing_probe")
+                assert result.rows == [[expected[selected]["db_id"]]]
+                completed += 1
+        async with asyncio.TaskGroup() as group:
+            for _ in range(concurrency):
+                group.create_task(worker())
+        assert completed == 1000
+        with pytest.raises(UnknownId):
+            await pool.bind("missing", "0" * 64)
+        assert (await bindings[0].query("SELECT value FROM routing_probe")).rows == [["left"]]
+
+
+async def test_parallel_harness_episodes_bind_different_databases(go_sql_backend):
+    from search_rl_env.contracts.types import ModelResponse, Usage
+
+    class SQLProbeModel:
+        metadata = {"model": "sql-probe-mock"}
+        async def complete(self, messages, **kwargs):
+            observations = [json.loads(message["content"]) for message in messages if message["role"] == "tool"]
+            if not observations:
+                name, arguments = "sql", {"query": "SELECT value FROM routing_probe"}
+            else:
+                name, arguments = "finish", {"answer": [observations[0]["rows"][0][0]], "document_ids": []}
+            return ModelResponse(message={"role": "assistant", "content": None, "tool_calls": [{
+                "id": f"call-{len(observations)}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)}}]},
+                usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1, cost=0.0), finish_reason="tool_calls")
+
+    url, expected = go_sql_backend
+    async with SQLClientPool(url) as pool:
+        bindings = [await pool.bind(row["db_id"], row["revision"]) for row in expected]
+        search = MockSearch([], corpus_id="sql-probe")
+        async with RolloutRunner(SQLProbeModel(), search, EpisodeConfig(max_steps=3), concurrency=16) as runner:
+            async def episode(index):
+                task = AgentTask(task_id=f"routing-{index}", question="Read the database value.", language="en", corpus_id="sql-probe")
+                result = await runner.run(task, sql=bindings[index % 2])
+                assert result.stop_reason == "finished", result.error
+                assert result.answer == [expected[index % 2]["db_id"]]
+                assert result.sql_calls == 1
+            async with asyncio.TaskGroup() as group:
+                for index in range(16):
+                    group.create_task(episode(index))

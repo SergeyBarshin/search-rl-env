@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "databases": [
+    {
+      "db_id": "hockey",
+      "path": "../../data/hydra/hockey.sqlite",
+      "revision": "2987cba3921e2544fcd4603eccf5ff97b17f63103d8feb6fb908d55eb5bd9ba2"
+    }
+  ]
+}

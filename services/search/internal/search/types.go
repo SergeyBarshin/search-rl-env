@@ -55,7 +55,7 @@ type Config struct {
 	Timeout       time.Duration `json:"timeout_nanoseconds"`
 }
 
-func DefaultConfig() Config { return Config{100, 500, 8000, 2000, 32, 4, 32, 5 * time.Second} }
+func DefaultConfig() Config { return Config{100, 500, 8000, 2000, 32, 16, 128, 5 * time.Second} }
 func (c Config) Validate() error {
 	if c.MaxResults < 1 || c.SnippetChars < 1 || c.MaxReadChars < 1 || c.MaxQueryChars < 1 || c.MaxQueryTerms < 1 || c.Workers < 1 || c.MaxPending < 1 || c.Timeout <= 0 {
 		return failure("invalid_request", "Все ограничения должны быть положительными.")

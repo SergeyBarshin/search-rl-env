@@ -181,3 +181,10 @@ Python SQLClient реализует прежний SqlBackend. Основной 
 train-задачу HyDRA, BIRD hockey и KILT-срез. Контракты, источники и ограничения —
 в [HYDRA_PILOT.md](HYDRA_PILOT.md). Это проверка инструментов с исходным SQL,
 не самостоятельное решение задачи моделью и не официальный benchmark score.
+
+## SQL-каталог для нескольких сред
+
+Каталог, маршрутизация по db_id/db_revision, SQL-only запуск и SQLClientPool
+описаны в [SQL_BACKEND.md](SQL_BACKEND.md). Клиент конкретной БД остаётся совместим
+с SqlBackend; различающиеся привязки передаются через существующий runner.run(sql=...).
+AgentTask и формат результата эпизода не изменяются.

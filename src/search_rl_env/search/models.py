@@ -115,3 +115,12 @@ class SQLInfo(WireModel):
 class SQLResponse(SqlResult):
     db_id: str = Field(min_length=1)
     db_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class SQLDatabase(WireModel):
+    db_id: str = Field(min_length=1)
+    db_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class SQLDatabases(WireModel):
+    databases: list[SQLDatabase]

@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from search_rl_env.contracts import SearchHit, SqlQueryError, SqlResult
 from .models import (ChunksResult, ErrorEnvelope, InvalidRequest, Manifest, SearchBusy,
                      SearchProtocolError, SearchResult, SearchTimeout, StorageError,
-                     TextResult, UnknownId, SQLInfo, SQLResponse)
+                     TextResult, UnknownId, SQLInfo, SQLResponse, SQLDatabases)
 
 ERRORS = {
     "sql_query_error": (400, SqlQueryError, "SQL не разрешён или превышает ограничения SQLite."),
@@ -154,17 +154,42 @@ class SearchClient:
 class SQLClient:
     """SqlBackend для исходной SQLite-базы в том же Go-сервисе."""
 
-    def __init__(self, base_url: str, **kwargs):
+    def __init__(self, base_url: str, *, db_id: str | None = None, db_revision: str | None = None, **kwargs):
+        if db_id is not None and (not isinstance(db_id, str) or not db_id.strip()):
+            raise ValueError("Нужен непустой db_id.")
+        if db_revision is not None and (db_id is None or not isinstance(db_revision, str) or not db_revision.strip()):
+            raise ValueError("db_revision требует непустого db_id и ревизии.")
         self._transport = SearchClient(base_url, **kwargs)
         self._info = None
+        self._db_id, self._db_revision = db_id, db_revision
 
     async def __aenter__(self):
+        if self._info is not None:
+            raise SearchProtocolError("SQLClient уже открыт; привязка к БД неизменяема.")
         try:
-            self._info = await self._transport._request("GET", "/v1/sql/schema", SQLInfo)
+            url = httpx.URL("/v1/sql/schema")
+            if self._db_id is not None:
+                url = url.copy_add_param("db_id", self._db_id)
+            if self._db_revision is not None:
+                url = url.copy_add_param("db_revision", self._db_revision)
+            info = await self._transport._request("GET", str(url), SQLInfo)
+            if ((self._db_id is not None and info.db_id != self._db_id) or
+                    (self._db_revision is not None and info.db_revision != self._db_revision)):
+                raise SearchProtocolError("Сервис вернул другую SQL-базу или ревизию.")
+            self._info = info
         except BaseException:
             await self._transport.aclose()
             raise
         return self
+
+    @classmethod
+    async def list_databases(cls, base_url: str, **kwargs) -> list[dict]:
+        transport = SearchClient(base_url, **kwargs)
+        try:
+            catalog = await transport._request("GET", "/v1/sql/databases", SQLDatabases)
+            return [database.model_dump() for database in catalog.databases]
+        finally:
+            await transport.aclose()
 
     async def __aexit__(self, *exc):
         await self._transport.aclose()

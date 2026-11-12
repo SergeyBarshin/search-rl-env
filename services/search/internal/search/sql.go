@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -42,6 +43,18 @@ type SQLStore struct {
 	info SQLInfo
 }
 
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(p)
+}
+
 func sqlOperationError(ctx context.Context, err error) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
@@ -60,6 +73,11 @@ func OpenSQL(ctx context.Context, path, dbID string, workers int) (*SQLStore, er
 	if !validID(dbID) || workers < 1 {
 		return nil, failure("invalid_request", "Нужен db_id и положительный размер пула SQL.")
 	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return nil, failure("storage_error", "Недопустимый путь SQL-снимка.")
+	}
+	path = absolute
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, failure("storage_error", "Не удалось открыть SQL-снимок.")
@@ -70,7 +88,7 @@ func OpenSQL(ctx context.Context, path, dbID string, workers int) (*SQLStore, er
 		return nil, failure("storage_error", "Нужен обычный файл SQL-базы.")
 	}
 	hash := sha256.New()
-	_, err = io.Copy(hash, file)
+	_, err = io.Copy(hash, contextReader{ctx, file})
 	file.Close()
 	if err != nil {
 		return nil, failure("storage_error", "Не удалось вычислить ревизию SQL-базы.")
@@ -92,7 +110,8 @@ func OpenSQL(ctx context.Context, path, dbID string, workers int) (*SQLStore, er
 		return nil, failure("storage_error", "Не удалось открыть SQL-снимок.")
 	}
 	db.SetMaxOpenConns(workers)
-	db.SetMaxIdleConns(workers)
+	// Открытые idle-соединения не растут вместе с числом зарегистрированных БД.
+	db.SetMaxIdleConns(0)
 	rows, err := db.QueryContext(ctx, "SELECT sql FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY name")
 	if err != nil {
 		db.Close()
