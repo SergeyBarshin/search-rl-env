@@ -1,0 +1,22 @@
+[
+  {
+    "dataset_id": "alpha",
+    "task": {
+      "task_id": "synthetic-alpha",
+      "question": "Прочитай value и keyword строки fact_id='target' таблицы facts. Найди документ по keyword. Верни value в answer и id документа в document_ids.",
+      "language": "ru",
+      "corpus_id": "alpha-corpus"
+    },
+    "reference_path": "alpha/reference.json"
+  },
+  {
+    "dataset_id": "beta",
+    "task": {
+      "task_id": "synthetic-beta",
+      "question": "Прочитай value и keyword строки fact_id='target' таблицы facts. Найди документ по keyword. Верни value в answer и id документа в document_ids.",
+      "language": "ru",
+      "corpus_id": "beta-corpus"
+    },
+    "reference_path": "beta/reference.json"
+  }
+]

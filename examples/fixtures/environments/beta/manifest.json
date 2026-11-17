@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "dataset_id": "beta",
+  "sql_path": "source.sql",
+  "sql_sha256": "f37d4af7bc23162db8a5c1ce157e8bc1a974d59df2d8b8fd49a5a4fd62e99b2d",
+  "sql_format": "fixture_sql",
+  "db_id": "beta-facts",
+  "corpus_path": "corpus.jsonl",
+  "corpus_sha256": "ceffb52ad12d62d854884e5992a66693b5377fc0c28ad74e2ef788296cf9bb99",
+  "corpus_id": "beta-corpus",
+  "dimensions": 128
+}

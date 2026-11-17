@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "dataset_id": "alpha",
+  "sql_path": "source.sql",
+  "sql_sha256": "56310c5278544d14745b4b9d928f724ab74b3d8fad69a3f4656842780749e7ea",
+  "sql_format": "fixture_sql",
+  "db_id": "alpha-facts",
+  "corpus_path": "corpus.jsonl",
+  "corpus_sha256": "6c0a8ed47856f8884f3a45f2a010ed27f8f9e92217626041ba87b69d1461c8ef",
+  "corpus_id": "alpha-corpus",
+  "dimensions": 128
+}

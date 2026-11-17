@@ -64,11 +64,14 @@ class SqlBackend(Protocol):
 
 
 class EpisodeConfig(Contract):
+    system_prompt: str | None = Field(default=None, min_length=1)
+    max_finish_retries: int = Field(default=0, ge=0)
+    rollout_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_steps: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
-    max_tokens_per_step: int = Field(default=512, ge=1)
+    max_tokens_per_step: int | None = Field(default=512, ge=1)
     search_limit: int = Field(default=10, ge=1)
-    max_snippet_chars: int = Field(default=2000, ge=1)
+    max_snippet_chars: int | None = Field(default=2000, ge=1)
     seed: int | None = None
 
 
@@ -151,6 +154,10 @@ class ModelTimeoutError(ModelError):
     code = "model_timeout"
 
 
+class ModelContextError(ModelError):
+    code = "model_context_limit"
+
+
 class ChatModel(Protocol):
     @property
     def metadata(self) -> dict[str, Any]: ...
@@ -160,7 +167,7 @@ class ChatModel(Protocol):
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]],
-        max_output_tokens: int,
+        max_output_tokens: int | None,
         seed: int | None,
     ) -> ModelResponse: ...
 
@@ -188,7 +195,7 @@ class ToolExecution(Contract):
 
 class EpisodeStep(Contract):
     step: int
-    request_max_output_tokens: int
+    request_max_output_tokens: int | None
     model_duration_seconds: float = Field(default=0, ge=0)
     usage: Usage = Field(default_factory=Usage)
     response_id: str | None = None

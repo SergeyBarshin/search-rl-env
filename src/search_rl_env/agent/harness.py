@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from typing import Literal
 
 import aiohttp
+from pydantic import Field
 
 from verifiers.v1 import Harness, HarnessConfig
 from verifiers.v1.runtimes import ProgramResult
@@ -22,6 +23,7 @@ harness_http: ContextVar[aiohttp.ClientSession | None] = ContextVar('harness_htt
 class SearchHarnessConfig(HarnessConfig):
     id: str = "search_rl_env"
     execution: Literal['in_process', 'subprocess'] = 'in_process'
+    max_finish_retries: int = Field(default=0, ge=0)
 
 
 class SearchHarness(Harness[SearchHarnessConfig]):
@@ -33,6 +35,8 @@ class SearchHarness(Harness[SearchHarnessConfig]):
 
     async def launch(self, ctx, trace, runtime, endpoint, secret, mcp_urls, data, tool_interception_url=None):
         if self.config.execution == 'subprocess':
+            if self.config.max_finish_retries:
+                raise ValueError('max_finish_retries пока поддерживается только in_process.')
             return await self._launch_subprocess(ctx, trace, runtime, endpoint, secret, mcp_urls, data,
                                                  tool_interception_url)
         if not runtime.is_local or mcp_urls or trace.state._executor is None:
@@ -51,6 +55,7 @@ class SearchHarness(Harness[SearchHarnessConfig]):
                      else [message_to_wire(item) for item in prompt or []])
         headers = {'Authorization': 'Bearer ' + secret}
         executor = trace.state._executor
+        finish_retries = 0
         async with executor:
             while True:
                 # Любой sampling проходит через Verifiers interception: TrainClient
@@ -69,7 +74,16 @@ class SearchHarness(Harness[SearchHarnessConfig]):
                 messages.append(message)
                 calls = message.get('tool_calls') or []
                 if not calls:
+                    if finish_retries < self.config.max_finish_retries:
+                        finish_retries += 1
+                        messages.append({'role': 'user', 'content':
+                            'No final answer has been submitted. Use the finish tool to submit '
+                            'your supported answer and retrieved document_ids (an empty list is allowed). '
+                            'State missing evidence explicitly. If another tool call is needed, '
+                            'you may make it before finish. Do not invent tool results.'})
+                        continue
                     break
+                finish_retries = 0
                 for call in calls:
                     if gate_url:
                         raw_args = call['function']['arguments']

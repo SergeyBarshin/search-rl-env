@@ -1,0 +1,23 @@
+{
+  "task_id": "train_a2s_4",
+  "db_id": "hockey",
+  "sql_query": "SELECT T2.name FROM TeamsSC AS T1 INNER JOIN Teams AS T2 ON T1.tmID = T2.tmID AND T1.year = T2.year WHERE T1.year = '1917' AND T1.W > T1.L",
+  "expected_columns": [
+    "name"
+  ],
+  "expected_rows": [
+    [
+      "Toronto Arenas"
+    ]
+  ],
+  "source_sql_output": {
+    "name": "Toronto Arenas"
+  },
+  "source_search_question": "What was the reason for the Toronto Arenas suspending operations after the 1918–19 season?",
+  "source_search_answer": "The Toronto Arenas suspended operations after the 1918–19 season due to mounting legal bills from a dispute, which forced them to sell most of their star players. This resulted in a poor five-win season, financial losses, and no hope of competing effectively in the standings of the three-team league. Consequently, they requested permission to suspend operations in late February 1919.",
+  "source_dataset": "Snowflake/HyDRA-Bench",
+  "source_revision": "176151eea2e171b674af961fa5d1b2b33eaa6e76",
+  "source_file": "train_a2s.json",
+  "source_record_sha256": "4e00d46fd89affca65bb9c3689c3310f5574f32da71d8d331776a7aaa9f40a1e",
+  "note": "Private replay/evaluation input; never sent to the model or search index."
+}

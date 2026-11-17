@@ -19,7 +19,7 @@ class SearchToolsetConfig(vf.ToolsetConfig):
     colocated: bool = True
     backend_url: str | None = None
     search_limit: int = Field(default=10, ge=1)
-    max_snippet_chars: int = Field(default=2000, ge=1)
+    max_snippet_chars: int | None = Field(default=2000, ge=1)
     hits: list[SearchHit] = Field(default_factory=list)
     enable_sql: bool = False
 

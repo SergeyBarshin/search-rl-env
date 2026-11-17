@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from search_rl_env.contracts.types import ModelError, ModelResponse, ModelTimeoutError, Usage
+from search_rl_env.contracts.types import ModelError, ModelResponse, ModelTimeoutError, ModelContextError, Usage
 from search_rl_env.profiling import HttpRecorder
 
 
@@ -68,7 +68,7 @@ class ChatCompletionsClient:
         messages: list[dict[str, Any]],
         *,
         tools: list[dict[str, Any]],
-        max_output_tokens: int,
+        max_output_tokens: int | None,
         seed: int | None,
     ) -> ModelResponse:
         profiler = HttpRecorder()
@@ -77,10 +77,11 @@ class ChatCompletionsClient:
             "messages": messages,
             "tools": tools,
             "tool_choice": "auto",
-            "max_tokens": max_output_tokens,
             "temperature": self._temperature,
             "stream": False,
         }
+        if max_output_tokens is not None:
+            payload['max_tokens'] = max_output_tokens
         if self._require_parameters:
             payload["provider"] = {"require_parameters": True}
         if seed is not None:
@@ -101,6 +102,18 @@ class ChatCompletionsClient:
                     try:
                         profiler.headers(response)
                         if not response.is_success:
+                            # Classify only recognizable provider context errors; never log its raw body.
+                            error_bytes = bytearray()
+                            async for chunk in response.aiter_bytes():
+                                error_bytes.extend(chunk[:65536-len(error_bytes)])
+                                if len(error_bytes)>=65536:
+                                    break
+                            diagnostic=error_bytes.decode('utf-8',errors='replace').lower()
+                            if response.status_code in (400, 413, 422) and any(marker in diagnostic for marker in (
+                                'context_length_exceeded', 'maximum context length', 'context window',
+                                'max_context_length_exceeded',
+                            )):
+                                raise ModelContextError('Достигнут предел контекста провайдера; полная история сохранена без обрезки.')
                             raise ModelError(f"Chat Completions HTTP {response.status_code}.")
                         body_started = perf_counter()
                         body = bytearray()

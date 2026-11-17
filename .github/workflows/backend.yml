@@ -1,0 +1,29 @@
+name: Backend and isolated environments
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test Python backend and isolated environments in Docker
+        run: sh scripts/check-docker.sh
+      - name: Save acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: environment-acceptance
+          path: runs/docker/
+          if-no-files-found: ignore

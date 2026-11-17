@@ -232,6 +232,41 @@ async def test_text_without_finish_is_unsuccessful_termination(task, search):
     assert result.selected_document_ids == []
 
 
+async def test_empty_response_can_recover_and_submit_real_tool_answer(task, search):
+    empty = ModelResponse(message={"role": "assistant", "content": None},
+        usage=Usage(prompt_tokens=5, completion_tokens=0, total_tokens=5), finish_reason="stop")
+    model = ScriptedModel([empty, action("search", {"query": "срок"}),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="finish")])
+    result = await run_episode(task, model, search, EpisodeConfig(max_finish_retries=2))
+    assert result.stop_reason == StopReason.FINISHED
+    assert result.selected_document_ids == ["doc-1"]
+    assert len(result.trajectory) == 3
+    assert result.usage.prompt_tokens == 15
+    assert "No final answer has been submitted" in model.requests[1]['messages'][-1]['content']
+    assert len(result.native_trace['calls']) == 3
+
+
+async def test_missing_finish_recovery_is_bounded(task, search):
+    empty = ModelResponse(message={"role": "assistant", "content": None},
+        usage=Usage(prompt_tokens=5, completion_tokens=0, total_tokens=5), finish_reason="stop")
+    model = ScriptedModel([empty, empty, empty])
+    result = await run_episode(task, model, search, EpisodeConfig(max_finish_retries=2))
+    assert result.error.code == "missing_finish"
+    assert len(model.requests) == len(result.trajectory) == 3
+    assert result.answer is None
+
+
+async def test_uncapped_episode_can_finish_after_more_than_eight_turns(task, search):
+    model = ScriptedModel([
+        *(action("search", {"query": f"query {i}"}, call_id=f"s-{i}") for i in range(10)),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="finish"),
+    ])
+    result = await run_episode(task, model, search, EpisodeConfig(max_finish_retries=2))
+    assert result.stop_reason == StopReason.FINISHED
+    assert len(result.trajectory) == 11
+    assert result.search_calls == 10
+
+
 async def test_multiple_calls_are_sequential_and_finish_stops_remaining_actions(task, search):
     response = action("search", {"query": "срок"})
     response.message["tool_calls"] += action("finish", {"document_ids": ["doc-1"]}, call_id="finish").message["tool_calls"]

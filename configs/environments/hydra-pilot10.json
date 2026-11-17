@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "dataset": "Snowflake/HyDRA-Bench",
+  "dataset_revision": "176151eea2e171b674af961fa5d1b2b33eaa6e76",
+  "dataset_file": "train_a2s.json",
+  "db_id": "hockey",
+  "count": 10,
+  "concurrency": 10,
+  "selection": "first_ten_distinct_hockey_questions_in_source_order",
+  "model_env": "MODEL_ID",
+  "endpoint_env": "MODEL_API_URL",
+  "max_model_calls": null,
+  "search_backend": "wikipedia",
+  "episode": {
+    "max_steps": null,
+    "max_output_tokens": null,
+    "max_tokens_per_step": null,
+    "max_finish_retries": 2,
+    "rollout_timeout_seconds": null,
+    "search_limit": 10,
+    "max_snippet_chars": null,
+    "seed": 42
+  },
+  "corpus": "examples/fixtures/hydra/corpus.jsonl",
+  "protocol": "diagnostic_train_pilot_without_memory_not_full_benchmark"
+}

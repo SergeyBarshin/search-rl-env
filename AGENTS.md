@@ -1,35 +1,45 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Current Direction and Project Memory
 
-This project builds an open-source RL environment for search agents and demonstrates training improvements on held-out tasks. It currently contains documentation only:
+Read `MEMORY.md` before changing scope. Build the static harness without a Verifiers dependency and measure its baseline first. The primary method is a runtime GEPA-like optimizer of prompts, followed by editable text skills. Compare against static and Hermes-like memory-only. Use docs/RUNTIME_OPTIMIZER.md and docs/EXPERIMENTS.md. Restrict runtime experience to public trajectories and internal critic signals. Keep gold, external scores and future tasks private to evaluation.
 
-- `README.md`: scope, infrastructure context, and initial model plan.
-- `docs/ENVIRONMENT.md`: observations, actions, rewards, and episode logging.
-- `docs/EXPERIMENTS.md`: datasets, evaluation protocol, and training stages.
-- `docs/TASKS.md`: agreed ownership and integration boundaries.
-- `docs/RELATED_WORK.md`: primary research sources.
+## Project Structure
 
-Source, tests, datasets, and assets directories have not been created. The sibling `../os_jev_ru` contains legacy reference material; review dependencies before reusing its code.
+The repository contains a Python package, examples, configs and tests:
 
-## Build, Test, and Development Commands
+- `src/search_rl_env/agent/`, `environment/`, `contracts/`: native Verifiers harness and contracts.
+- `src/search_rl_env/search/`: SQL/search services, SDKs and isolated backend adapters.
+- `src/search_rl_env/ui/`: local UI.
+- Planned `memory/`: persistent notes, session recall, skills, maintenance and snapshots.
+- Planned `benchmarks/`, `evaluation/`: datasets, evaluators, stream protocols and experiment runners.
+- `docs/PAPER_PLAN.md`: article claim, system and evidence plan.
+- `docs/MEMORY_CORE.md`: target memory architecture; it is not an implementation claim.
+- `docs/EXPERIMENTS.md`: closed evaluation and chronological online-use protocol.
+- `docs/TASKS.md`, `BACKLOG.md`, `ROADMAP.md`: owners, dependencies and milestones.
 
-No build system, dependency manifest, executable entry point, or test runner is configured. Use `rg --files .` to inspect files and `rg -n 'pattern' README.md docs/` to search documentation. When adding runnable code, document exact installation, execution, and test commands in `README.md`.
+The sibling `../os_jev_ru` is legacy reference material, not a runtime dependency. Preserve existing uncommitted work.
 
-## Coding Style & Naming Conventions
+## Build and Tests
 
-Write project documentation and experiment notes in Russian; use English code identifiers. For new Python code, use four-space indentation, `snake_case` functions and modules, and `PascalCase` classes. Keep Markdown sections descriptive and examples accurate. No formatter or linter is configured; document tooling when introduced.
+Use the exact installation and execution commands in `README.md`. Python 3.11+ and `pyproject.toml` are configured. Default checks use pytest/pytest-asyncio: `.venv/bin/python -m pytest -q`. Documentation changes require working local links and `git diff --check`.
 
-## Testing Guidelines
+Keep ordinary tests independent of paid APIs, model downloads and GPUs. Memory checks should cover persistence across sessions/restarts, scope isolation, deterministic event ordering, update/restore, stale records, cancellation and resume. Existing reward, duplicate-id, invalid-action and budget tests remain relevant.
 
-No test framework or coverage threshold exists yet. Prefer pytest for new Python tests, with files such as `tests/test_metrics.py` and functions named `test_<behavior>`. Cover reward calculation, duplicate document IDs, budget exhaustion, invalid actions, and deterministic replay. Keep default tests independent of model downloads, paid APIs, and GPUs. Document the test command once configured.
+## Style and Workflow
 
-## Commit & Pull Request Guidelines
+Write documentation and experiment notes in Russian; use English code identifiers. Python uses four-space indentation, snake_case functions/modules and PascalCase classes. Keep executable examples accurate. Follow `CONTRIBUTING.md` for branches, PRs and reviews. Commit subjects are concise and imperative. Update affected specifications with interface changes; do not present planned APIs as implemented commands.
 
-Git is not initialized, so no historical commit convention exists. Use concise imperative subjects, for example `Add episode result validation`. PRs should explain the change, relevant task, validation performed, and experiment impact. Update affected specifications alongside interface or reward changes.
+## Ownership and Contracts
 
-## Architecture & Experiment Rules
+Sergey owns the agent, harness and memory policy. Dima owns corpus/SQL storage, search APIs, snapshots and indexes. Kolya owns benchmark execution, event logs, resume, artifacts and costs. Vova owns open/custom benchmark tasks, feedback scenarios, metrics and judges. Coordinate shared interfaces through `docs/TASKS.md` and `docs/CONTRACTS.md`.
 
-Sergey owns agents, harness, and models; Dima owns corpus storage and search APIs; Kolya owns benchmark execution infrastructure; Vova owns tasks, metrics, and judges. Coordinate shared contracts through `docs/TASKS.md`.
+Target runtime and evaluator must run without Verifiers. The existing implementation documents the prior prototype. Do not invent training fields in API rollouts. Memory recall and source-document RAG are separate data paths.
 
-Keep evaluation questions and labels out of training. Record dataset/model revisions, seeds, prompts, budgets, trajectories, and costs in MLflow. Keep credentials outside tracked files. Obtain explicit authorization for paid runs and avoid heavy local computation or model downloads on the Mac.
+## Evaluation and Resources
+
+Closed evaluation uses frozen memory and excludes test records from adaptive recall. Online-use evaluation is chronological: answer first, record the independent score, then provide only the declared feedback and update memory for later tasks. Do not read future tasks or labels or revise previous scores. The two protocols must remain explicitly distinct.
+
+Build a permitted view of native Trace for memory recall. Private TaskData reference answers, document labels and gold SQL must not enter its index directly; only declared feedback may expose corrections after scoring.
+
+Log dataset/model/code revisions, seeds, prompts, event order, budgets, memory snapshots, retrieved records, trajectories and all costs in manifests/MLflow. Keep credentials out of tracked files. Paid API/cloud/GPU runs require explicit budget authorization; avoid heavy local computation and model downloads on the Mac.

@@ -53,7 +53,7 @@ class MockModel:
                     "function": {"name": name, "arguments": json.dumps(arguments, ensure_ascii=False)},
                 }],
             },
-            usage=Usage(prompt_tokens=0, completion_tokens=min(1, max_output_tokens), total_tokens=min(1, max_output_tokens), cost=0.0),
+            usage=Usage(prompt_tokens=0, completion_tokens=1, total_tokens=1, cost=0.0),
             finish_reason="tool_calls",
             model="search-then-finish-v1",
         )

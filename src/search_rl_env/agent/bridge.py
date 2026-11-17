@@ -121,7 +121,8 @@ class BackendBridge:
 
     async def complete(self, body):
         step = len(self.records) + 1
-        max_tokens = min(body.get('max_tokens') or self.config.max_tokens_per_step, self.config.max_tokens_per_step)
+        caps = [cap for cap in (body.get('max_tokens'), self.config.max_tokens_per_step) if cap is not None]
+        max_tokens = min(caps) if caps else None
         # Текущее продолжение уже содержит всю историю. Предыдущие snapshots
         # не нужны проекции и росли квадратично с длиной эпизода.
         if self.records:

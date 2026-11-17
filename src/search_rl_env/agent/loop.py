@@ -159,7 +159,7 @@ async def _run_episode(task, model, search, config, *, resources, on_event=None,
                 public['sql_schema'] = sql.schema
             search_task = SearchTask(
                 SearchTaskData(id=task.task_id, agent_task=task, prompt=json.dumps(public, ensure_ascii=False),
-                    system_prompt=HYBRID_SYSTEM_PROMPT if sql is not None else SYSTEM_PROMPT,
+                    system_prompt=config.system_prompt or (HYBRID_SYSTEM_PROMPT if sql is not None else SYSTEM_PROMPT),
                     reference_document_ids=reference_document_ids,
                     sql_schema=sql.schema if sql is not None else None, reference_answer=reference_answer),
                 SearchTaskConfig(tools=SearchToolsetConfig(
@@ -172,12 +172,14 @@ async def _run_episode(task, model, search, config, *, resources, on_event=None,
             )
             agent = vf.Agent(AgentConfig(
                 model=model.metadata.get("model") or "model",
-                harness=SearchHarnessConfig(execution=resources.execution),
+                harness=SearchHarnessConfig(execution=resources.execution,
+                    max_finish_retries=config.max_finish_retries),
                 runtime=vf.SubprocessConfig(),
                 client=vf.EvalClientConfig(base_url=bridge.model_url, api_key_var=bridge.key_var),
                 sampling=vf.SamplingConfig(temperature=0.0, max_tokens=config.max_tokens_per_step),
                 max_turns=config.max_steps, max_output_tokens=config.max_output_tokens,
-                timeout=TimeoutConfig(setup=60, finalize=10, scoring=10), network_notice=False,
+                timeout=TimeoutConfig(setup=60, rollout=config.rollout_timeout_seconds,
+                    finalize=10, scoring=10), network_notice=False,
             ), interception=resources.interception)
             trace = await agent.run(search_task, on_trace=observe)
     except asyncio.CancelledError:
