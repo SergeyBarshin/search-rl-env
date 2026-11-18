@@ -18,9 +18,9 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from search_rl_env.agent import RolloutRunner, save_episode
+from search_rl_env.agent import save_episode
 from search_rl_env.contracts import AgentTask, EpisodeConfig
-from search_rl_env.contracts.types import ModelError, ModelResponse, Usage
+from search_rl_env.contracts.types import ModelAuthenticationError, ModelError, ModelResponse, ModelTimeoutError, Usage
 from .environments import EnvironmentFactory
 from .local import fingerprint, joined_thread
 
@@ -116,12 +116,16 @@ class ReservedBudgetModel:
     клиента, не жёсткий лимит биллинга провайдера.
     """
 
-    def __init__(self, delegate, budget_usd, request_reserve_usd):
+    def __init__(self, delegate, budget_usd, request_reserve_usd, *, continue_after_timeout=False,
+                 retry_auth_once=False, recoverable_errors: tuple[type[ModelError], ...] = ()):
         if (not all(math.isfinite(n) and n > 0 for n in (budget_usd, request_reserve_usd)) or
                 request_reserve_usd > budget_usd):
             raise ValueError("Нужны конечный бюджет и положительный резерв на запрос <= бюджета.")
         self.delegate, self.budget, self.reserve = delegate, budget_usd, request_reserve_usd
         self.spent, self.reserved, self.blocked = 0.0, 0.0, False
+        self._recoverable_errors = (*recoverable_errors, ModelTimeoutError) if continue_after_timeout else recoverable_errors
+        self._retry_auth_once = retry_auth_once
+        self.auth_retries = 0
         self._lock = asyncio.Lock()
 
     @property
@@ -129,17 +133,36 @@ class ReservedBudgetModel:
         return {**self.delegate.metadata, "budget_usd": self.budget, "request_reserve_usd": self.reserve}
 
     async def complete(self, *args, **kwargs):
+        try:
+            return await self._complete_once(*args, **kwargs)
+        except ModelAuthenticationError:
+            if not self._retry_auth_once:
+                raise
+            self.auth_retries += 1
+            await asyncio.sleep(1)
+            return await self._complete_once(*args, **kwargs)
+
+    async def _complete_once(self, *args, **kwargs):
         async with self._lock:
             if self.blocked or self.spent + self.reserved + self.reserve > self.budget + 1e-12:
                 raise ModelError("Бюджет модели исчерпан или стоимость предыдущего запроса неизвестна.")
             self.reserved += self.reserve
         try:
             response = await self.delegate.complete(*args, **kwargs)
+        except ModelAuthenticationError:
+            if self._retry_auth_once:
+                async with self._lock:
+                    self.reserved = max(0.0, self.reserved - self.reserve)
+            else:
+                self.blocked = True
+            raise
+        except self._recoverable_errors:
+            raise
         except BaseException:
             self.blocked = True
             raise
         async with self._lock:
-            self.reserved -= self.reserve
+            self.reserved = max(0.0, self.reserved - self.reserve)
             if response.usage.cost is None:
                 self.reserved += self.reserve
                 self.blocked = True
@@ -197,7 +220,13 @@ async def memory_sample():
     async def sample():
         while True:
             rss = 0
-            for item in [process, *process.children(recursive=True)]:
+            children = []
+            if state["includes_children"]:
+                try:
+                    children = process.children(recursive=True)
+                except (PermissionError, psutil.AccessDenied):
+                    state["includes_children"] = False
+            for item in [process, *children]:
                 try:
                     rss += item.memory_info().rss
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -220,6 +249,8 @@ async def memory_sample():
 
 
 async def run_batch(factory, rows, references, config, concurrency, output, entries, model=None):
+    from search_rl_env.agent import RolloutRunner
+
     gate = StartGate(min(concurrency, config.episodes), config.gate_timeout_seconds)
     model = model or ProbeModel(gate, config.mock_latency_seconds)
     source = iter(range(config.episodes))

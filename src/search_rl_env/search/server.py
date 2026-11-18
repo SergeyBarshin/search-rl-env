@@ -67,6 +67,11 @@ def build_snapshot(source, output, corpus_id, revision=None, chunk_chars=2000):
         index_algorithm=ALGORITHM, sqlite_version=sqlite3.sqlite_version, driver_version='stdlib-sqlite3')
     manifest['index_revision'] = fingerprint(manifest)
     output = Path(output)
+    if output.exists():
+        existing = SearchStore(output)
+        if any(existing.manifest[key] != value for key, value in manifest.items()):
+            raise ValueError('Путь занят другим снимком.')
+        return manifest
     output.parent.mkdir(parents=True, exist_ok=True)
     import tempfile, os
     fd, name = tempfile.mkstemp(prefix='.search-build-', dir=output.parent)
@@ -104,14 +109,27 @@ def build_snapshot(source, output, corpus_id, revision=None, chunk_chars=2000):
 
 
 class SearchStore:
-    def __init__(self, path):
+    def __init__(self, path, *, sealed=False):
         self.path = Path(path).resolve()
+        self._sealed = sealed
         require_standalone(self.path)
+        self._snapshot_stat = self._stat_signature()
         with self.connection() as db:
             manifest = json.loads(db.execute('SELECT value FROM metadata').fetchone()[0])
         self.manifest = Manifest.model_validate({**manifest, 'api_version': '1',
             'search_revision': fingerprint([manifest, CONFIG]), 'config': CONFIG}).model_dump()
         self.revision = digest_file(self.path)
+        if self._stat_signature() != self._snapshot_stat:
+            raise StorageError('Поисковый снимок изменён.')
+
+    def _stat_signature(self):
+        stat = self.path.stat()
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+    def assert_snapshot(self):
+        changed = self._stat_signature() != self._snapshot_stat if self._sealed else digest_file(self.path) != self.revision
+        if changed:
+            raise StorageError('Поисковый снимок изменён.')
 
     from contextlib import contextmanager
 
@@ -129,8 +147,7 @@ class SearchStore:
         if (request.corpus_id != self.manifest['corpus_id'] or
             request.corpus_revision not in (None, self.manifest['corpus_revision'])):
             raise UnknownId('Неизвестный корпус или ревизия.')
-        if digest_file(self.path) != self.revision:
-            raise StorageError('Поисковый снимок изменён.')
+        self.assert_snapshot()
         return {k: self.manifest[k] for k in ('corpus_id','corpus_revision','index_revision','search_revision')}
 
     def search(self, request):

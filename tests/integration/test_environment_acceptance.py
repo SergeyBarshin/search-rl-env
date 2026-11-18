@@ -40,7 +40,7 @@ async def test_forty_actual_hybrid_episodes_have_private_tools_and_saved_revisio
         environment = binding["environment"]
         assert result["task"]["corpus_revision"] == environment["search"]["corpus_revision"]
         assert result["sql_calls"] == result["search_calls"] == 1
-        assert result["reward"] == 1
+        assert "reward" not in result
         expected = "ALPHA-17" if environment["dataset_id"] == "alpha" else "BETA-29"
         assert result["answer"] == [expected]
         other = "betakey" if environment["dataset_id"] == "alpha" else "alphakey"

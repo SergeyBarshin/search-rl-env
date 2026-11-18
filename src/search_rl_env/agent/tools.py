@@ -1,9 +1,9 @@
 """Схемы инструментов и проверка аргументов до обращения к бэкенду."""
 
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError, field_validator
 
 from search_rl_env.contracts.types import (
     AgentTask,
@@ -22,8 +22,23 @@ class SearchArguments(Contract):
     query: str = Field(min_length=1)
 
 
+class RoundSearchArguments(SearchArguments):
+    top_k: int | None = Field(default=None, ge=1, description="Number of hits up to the configured search limit.")
+
+
 class FinishArguments(Contract):
     document_ids: list[str]
+
+
+class RankedFinishArguments(FinishArguments):
+    document_ids: list[str] = Field(max_length=10)
+
+
+class SaveRoundArguments(Contract):
+    document_ids: list[str] = Field(min_length=1, max_length=15)
+    summary: str = Field(min_length=1, max_length=2000)
+    unresolved: list[Annotated[str, Field(min_length=1, max_length=256)]] = Field(max_length=12)
+    next_goal: str = Field(min_length=1, max_length=1000)
 
 
 class SqlArguments(Contract):
@@ -32,6 +47,11 @@ class SqlArguments(Contract):
 
 class HybridFinishArguments(FinishArguments):
     answer: list[str]
+
+    @field_validator("answer", mode="before")
+    @classmethod
+    def wrap_text_answer(cls, value):
+        return [value] if isinstance(value, str) else value
 
 
 class FunctionCall(Contract):
@@ -52,8 +72,8 @@ class ToolCall(Contract):
 _search_hits = TypeAdapter(list[SearchHit])
 
 
-@lru_cache(maxsize=2)
-def tool_schemas(enable_sql: bool = False) -> list[dict]:
+@lru_cache(maxsize=4)
+def tool_schemas(enable_sql: bool = False, *, retrieval_rounds: bool = False) -> list[dict]:
     return [
         {
             "type": "function",
@@ -64,11 +84,14 @@ def tool_schemas(enable_sql: bool = False) -> list[dict]:
             },
         }
         for name, description, arguments in [
-            ("search", "Найти документы по запросу в корпусе задачи.", SearchArguments),
+            ("search", "Найти документы по запросу в корпусе задачи.",
+             RoundSearchArguments if retrieval_rounds else SearchArguments),
             ("finish", "Завершить с ранжированными id показанных документов.",
-             HybridFinishArguments if enable_sql else FinishArguments),
+             HybridFinishArguments if enable_sql else RankedFinishArguments if retrieval_rounds else FinishArguments),
         ] + ([("sql", "Выполнить SQL только на чтение к таблицам из схемы задачи (SQLite).", SqlArguments)]
-             if enable_sql else [])
+             if enable_sql else []) + ([
+                 ("save_and_advance", "Сохрани показанные свидетельства, итог и цель следующего раунда.", SaveRoundArguments),
+             ] if retrieval_rounds else [])
     ]
 
 
@@ -89,6 +112,8 @@ async def execute_tool(
     config,
     state,
     sql: SqlBackend | None = None,
+    visible_ids: set[str] | None = None,
+    on_search_hits=None,
 ) -> dict:
     if state.stop_reason is not None:
         return tool_error("episode_stopped", "Эпизод уже остановлен; действие не выполнено.")
@@ -98,20 +123,25 @@ async def execute_tool(
         return invalid_action(state, "unknown_tool", "Неизвестный инструмент.")
     try:
         if name == "search":
-            parsed = SearchArguments.model_validate_json(arguments)
+            validator = SearchArguments if visible_ids is None else RoundSearchArguments
+            parsed = validator.model_validate_json(arguments)
             if not parsed.query.strip():
                 return invalid_action(state, "invalid_arguments", "Запрос не может быть пустым.")
+            limit = parsed.top_k if isinstance(parsed, RoundSearchArguments) and parsed.top_k else config.search_limit
+            if limit > config.search_limit:
+                return invalid_action(state, "invalid_arguments", f"Максимальный top_k: {config.search_limit}.")
         elif name == "sql":
             parsed = SqlArguments.model_validate_json(arguments)
         else:
-            validator = HybridFinishArguments if sql is not None else FinishArguments
+            validator = HybridFinishArguments if sql is not None else RankedFinishArguments if visible_ids is not None else FinishArguments
             parsed = validator.model_validate_json(arguments)
     except ValidationError:
         return invalid_action(state, "invalid_arguments", f"Аргументы {name} не соответствуют схеме.")
 
     if isinstance(parsed, FinishArguments):
         document_ids = list(dict.fromkeys(parsed.document_ids))
-        if any(doc_id not in state.discovered_ids for doc_id in document_ids):
+        allowed = state.discovered_ids if visible_ids is None else visible_ids
+        if any(doc_id not in allowed for doc_id in document_ids):
             return invalid_action(state, "unknown_document", "В finish разрешены только показанные id.")
         state.selected_ids = document_ids
         if isinstance(parsed, HybridFinishArguments):
@@ -138,7 +168,7 @@ async def execute_tool(
             parsed.query,
             corpus_id=task.corpus_id,
             corpus_revision=task.corpus_revision,
-            limit=config.search_limit,
+            limit=limit,
         )
         hits = _search_hits.validate_python(raw_hits, strict=True)
     except Exception as exc:
@@ -147,14 +177,16 @@ async def execute_tool(
         state.error = EpisodeError(code="search_error", message=f"Ошибка поиска: {type(exc).__name__}.")
         return tool_error(state.error.code, state.error.message)
 
+    if on_search_hits is not None:
+        on_search_hits(parsed.query, hits[:limit])
     shown = []
-    seen_in_search: set[str] = set()
+    seen_in_search = set() if visible_ids is None else visible_ids.copy()
     for hit in hits:
         if hit.doc_id in seen_in_search:
             continue
         seen_in_search.add(hit.doc_id)
         shown.append(hit.model_copy(update={"snippet": hit.snippet[: config.max_snippet_chars]}))
-        if len(shown) == config.search_limit:
+        if len(shown) == limit:
             break
     state.discovered_ids.update(hit.doc_id for hit in shown)
     return {"ok": True, "hits": [hit.model_dump() for hit in shown]}

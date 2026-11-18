@@ -1,19 +1,17 @@
-from pydantic import Field, PrivateAttr
-from verifiers.v1 import State
+"""Состояние инструментов одного эпизода."""
 
-from search_rl_env.contracts.types import EpisodeError, StopReason, ToolExecution
+from dataclasses import dataclass, field
+
+from search_rl_env.contracts.types import EpisodeError, StopReason
 
 
-class SearchState(State):
-    # Живые бэкенды принадлежат одному rollout и не входят в wire state/trace.
-    _executor: object = PrivateAttr(default=None)
-    discovered_ids: set[str] = Field(default_factory=set)
-    selected_ids: list[str] = Field(default_factory=list)
+@dataclass
+class SearchState:
+    discovered_ids: set[str] = field(default_factory=set)
+    selected_ids: list[str] = field(default_factory=list)
     searches: int = 0
     sql_calls: int = 0
     answer: list[str] | None = None
     invalid_actions: int = 0
     stop_reason: StopReason | None = None
     error: EpisodeError | None = None
-    pending_calls: list[dict] = Field(default_factory=list)
-    actions: list[ToolExecution] = Field(default_factory=list)

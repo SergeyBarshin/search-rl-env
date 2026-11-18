@@ -6,7 +6,7 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from search_rl_env.contracts.types import ModelError, ModelResponse, Usage
+from search_rl_env.contracts.types import ModelAuthenticationError, ModelError, ModelResponse, ModelTimeoutError, Usage
 from search_rl_env.search.acceptance import AcceptanceConfig, ReservedBudgetModel, StartGate, distribution
 
 
@@ -67,6 +67,47 @@ async def test_budget_blocks_unknown_or_underestimated_cost(cost):
     with pytest.raises(ModelError):
         await model.complete()
     assert delegate.calls == 1 and model.blocked
+
+
+async def test_budget_can_continue_after_timeout_with_reserve_held():
+    class FirstTimeout(CostModel):
+        async def complete(self):
+            if self.calls == 0:
+                self.calls += 1
+                raise ModelTimeoutError("timeout")
+            return await super().complete()
+
+    delegate = FirstTimeout(0.02)
+    delegate.release.set()
+    model = ReservedBudgetModel(delegate, 0.10, 0.04, continue_after_timeout=True)
+    with pytest.raises(ModelTimeoutError):
+        await model.complete()
+    assert model.reserved == 0.04 and not model.blocked
+
+    await model.complete()
+    await model.complete()
+
+    with pytest.raises(ModelError):
+        await model.complete()
+    assert delegate.calls == 3
+    assert model.reserved == 0.04 and model.spent == 0.04
+
+
+async def test_budget_retries_one_auth_rejection_with_the_same_budget():
+    class FirstAuthenticationRejection(CostModel):
+        async def complete(self):
+            if self.calls == 0:
+                self.calls += 1
+                raise ModelAuthenticationError("401")
+            return await super().complete()
+
+    delegate = FirstAuthenticationRejection(0.02)
+    delegate.release.set()
+    model = ReservedBudgetModel(delegate, 0.04, 0.04, retry_auth_once=True)
+    await model.complete()
+
+    assert delegate.calls == 2 and model.auth_retries == 1
+    assert model.reserved == 0 and model.spent == 0.02 and not model.blocked
 
 
 def test_cli_requires_explicit_paid_flag_before_loading_credentials():

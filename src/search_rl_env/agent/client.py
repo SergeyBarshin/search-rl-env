@@ -9,7 +9,9 @@ from typing import Any
 import httpx
 from pydantic import ValidationError
 
-from search_rl_env.contracts.types import ModelError, ModelResponse, ModelTimeoutError, ModelContextError, Usage
+from search_rl_env.contracts.types import (
+    ModelAuthenticationError, ModelContextError, ModelError, ModelResponse, ModelTimeoutError, Usage,
+)
 from search_rl_env.profiling import HttpRecorder
 
 
@@ -23,6 +25,11 @@ class ChatCompletionsClient:
         auth_scheme: str = "Bearer",
         adapter: str = "chat-completions",
         require_parameters: bool = False,
+        max_price_usd_per_million: tuple[float, float] | None = None,
+        openrouter_provider: str | None = None,
+        reasoning_enabled: bool | None = None,
+        reasoning_effort: str | None = None,
+        force_final_tool: bool = False,
         temperature: float = 0.0,
         timeout_seconds: float = 60.0,
         http_client: httpx.AsyncClient | None = None,
@@ -31,12 +38,23 @@ class ChatCompletionsClient:
             raise ValueError("Нужны непустые api_key и model.")
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds должен быть конечным положительным числом.")
+        if max_price_usd_per_million is not None and not all(
+            math.isfinite(rate) and rate > 0 for rate in max_price_usd_per_million
+        ):
+            raise ValueError("Цены входных и выходных токенов должны быть конечными и положительными.")
+        if reasoning_enabled is False and reasoning_effort is not None:
+            raise ValueError("reasoning_effort требует включённого reasoning.")
         self._api_key = api_key
         self._model = model
         self._endpoint = endpoint
         self._auth_scheme = auth_scheme
         self._adapter = adapter
         self._require_parameters = require_parameters
+        self._max_price = max_price_usd_per_million
+        self._openrouter_provider = openrouter_provider
+        self._reasoning_enabled = reasoning_enabled
+        self._reasoning_effort = reasoning_effort
+        self._force_final_tool = force_final_tool
         self._temperature = temperature
         self._timeout_seconds = timeout_seconds
         self._owns_client = http_client is None
@@ -51,6 +69,11 @@ class ChatCompletionsClient:
             "timeout_seconds": self._timeout_seconds,
             "endpoint": self._endpoint,
             "require_parameters": self._require_parameters,
+            "max_price_usd_per_million": self._max_price,
+            **({"openrouter_provider": self._openrouter_provider} if self._openrouter_provider else {}),
+            **({"reasoning_enabled": self._reasoning_enabled} if self._reasoning_enabled is not None else {}),
+            **({"reasoning_effort": self._reasoning_effort} if self._reasoning_effort is not None else {}),
+            **({"force_final_tool": True} if self._force_final_tool else {}),
         }
 
     async def __aenter__(self) -> "ChatCompletionsClient":
@@ -75,15 +98,29 @@ class ChatCompletionsClient:
         payload = {
             "model": self._model,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
             "temperature": self._temperature,
             "stream": False,
         }
+        if tools:
+            payload.update(tools=tools, tool_choice="auto")
+            if self._force_final_tool and len(tools) == 1 and tools[0]["function"]["name"] == "finish":
+                payload["tool_choice"] = {"type": "function", "function": {"name": "finish"}}
         if max_output_tokens is not None:
             payload['max_tokens'] = max_output_tokens
         if self._require_parameters:
             payload["provider"] = {"require_parameters": True}
+        if self._max_price is not None:
+            prompt, completion = self._max_price
+            payload["provider"] = {
+                "require_parameters": True,
+                "max_price": {"prompt": prompt, "completion": completion},
+            }
+        if self._openrouter_provider:
+            payload.setdefault("provider", {}).update(only=[self._openrouter_provider], allow_fallbacks=False)
+        if self._reasoning_enabled is not None:
+            payload["reasoning"] = {"enabled": self._reasoning_enabled}
+        if self._reasoning_effort is not None:
+            payload.setdefault("reasoning", {})["effort"] = self._reasoning_effort
         if seed is not None:
             payload["seed"] = seed
         try:
@@ -102,6 +139,8 @@ class ChatCompletionsClient:
                     try:
                         profiler.headers(response)
                         if not response.is_success:
+                            if response.status_code == 401:
+                                raise ModelAuthenticationError("Chat Completions HTTP 401.")
                             # Classify only recognizable provider context errors; never log its raw body.
                             error_bytes = bytearray()
                             async for chunk in response.aiter_bytes():

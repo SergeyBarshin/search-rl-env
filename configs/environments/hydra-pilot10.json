@@ -1,5 +1,5 @@
 {
-  "version": 3,
+  "version": 8,
   "dataset": "Snowflake/HyDRA-Bench",
   "dataset_revision": "176151eea2e171b674af961fa5d1b2b33eaa6e76",
   "dataset_file": "train_a2s.json",
@@ -10,15 +10,16 @@
   "model_env": "MODEL_ID",
   "endpoint_env": "MODEL_API_URL",
   "max_model_calls": null,
-  "search_backend": "wikipedia",
+  "search_backend": "kilt_hybrid",
   "episode": {
-    "max_steps": null,
+    "max_steps": 20,
+    "finish_on_last_step": true,
     "max_output_tokens": null,
-    "max_tokens_per_step": null,
+    "max_tokens_per_step": 16384,
     "max_finish_retries": 2,
-    "rollout_timeout_seconds": null,
+    "rollout_timeout_seconds": 300,
     "search_limit": 10,
-    "max_snippet_chars": null,
+    "max_snippet_chars": 3000,
     "seed": 42
   },
   "corpus": "examples/fixtures/hydra/corpus.jsonl",

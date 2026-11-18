@@ -7,7 +7,6 @@ from search_rl_env.agent.mocks import MockSearch, MockSqlRagModel
 from search_rl_env.contracts import EpisodeConfig, SqlQueryError
 from search_rl_env.environment.demo import HYBRID_HITS, HYBRID_REFERENCE, hybrid_task
 from search_rl_env.environment.sql import MockSql
-from search_rl_env.environment.taskset import SearchTaskset, SearchTasksetConfig
 
 
 async def test_sql_executes_different_queries_on_fixture():
@@ -48,7 +47,7 @@ async def test_sql_result_size_and_compute_are_bounded():
         await MockSql().query('SELECT randomblob(2000000)')
 
 
-async def test_hybrid_rollout_has_answer_sources_native_trace_and_reward():
+async def test_hybrid_rollout_has_answer_sources_trajectory_and_reward():
     task = hybrid_task()
     search = MockSearch(HYBRID_HITS, corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
 
@@ -66,7 +65,7 @@ async def test_hybrid_rollout_has_answer_sources_native_trace_and_reward():
     assert result.selected_document_ids == ['policy-001']
     assert result.sql_calls == result.search_calls == 1
     assert result.reward == 1
-    assert list(result.native_trace['rewards']) == ['answer_accuracy']
+    assert result.sql_enabled and result.native_trace is None
     assert [step.actions[0].name for step in result.trajectory] == ['search', 'sql', 'finish']
     assert result.trajectory[1].actions[0].result['rows'] == [['ORD-101'], ['ORD-105']]
 
@@ -103,19 +102,10 @@ async def test_broken_sql_backend_is_infrastructure_error_and_redacted():
     assert 'do-not-expose' not in result.model_dump_json()
 
 
-def test_hybrid_native_taskset_uses_private_answer_and_public_schema():
-    taskset = SearchTaskset(SearchTasksetConfig(scenario='sql_rag', require_references=True))
-    task = next(iter(taskset.load()))
-    assert task.data.reference_answer == HYBRID_REFERENCE
-    assert 'reference_answer' not in task.data.prompt
-    assert 'ORD-101' not in task.data.prompt
-    assert task.config.tools.enable_sql
-    assert {hook.__name__ for hook in task.hooks('reward')} == {'answer_accuracy'}
-
-
 @pytest.mark.parametrize(('answer', 'reference', 'reward'), [
     (['ORD-102'], HYBRID_REFERENCE, 0.0),
     ([], [], 1.0),
+    ('ORD-102', ['ORD-102'], 1.0),
 ])
 async def test_answer_reward_checks_exact_set_including_empty_answer(answer, reference, reward):
     class FinishModel(MockSqlRagModel):
@@ -129,7 +119,7 @@ async def test_answer_reward_checks_exact_set_including_empty_answer(answer, ref
     task = hybrid_task()
     result = await run_episode(task, FinishModel(), MockSearch(HYBRID_HITS, corpus_id=task.corpus_id, corpus_revision='v1'), EpisodeConfig(), sql=MockSql(), reference_answer=reference)
     assert result.stop_reason.value == 'finished'
-    assert result.answer == answer
+    assert result.answer == ([answer] if isinstance(answer, str) else answer)
     assert result.reward == reward
     assert result.sql_calls == result.search_calls == 0
 

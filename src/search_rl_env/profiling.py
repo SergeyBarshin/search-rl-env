@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
 from pathlib import Path
-from time import perf_counter, time
+from time import perf_counter
 from uuid import uuid4
 
 from search_rl_env.contracts.types import EpisodeEvent, EpisodeProfile, HttpPhase, HttpProfile
@@ -133,7 +133,6 @@ class EpisodeRecorder:
         self.started_at = datetime.now(timezone.utc)
         self.episode_id = uuid4().hex
         self.on_event = on_event
-        self.seen_phases: set[tuple[str, str]] = set()
 
     def emit(self, event: EpisodeEvent) -> None:
         if self.on_event is not None:
@@ -143,34 +142,13 @@ class EpisodeRecorder:
                 "timestamp": datetime.now(timezone.utc),
             }))
 
-    def observe_trace(self, trace) -> None:
-        self.episode_id = trace.id
-        for name in ("boot", "setup", "agent", "finalize", "scoring"):
-            span = getattr(trace.timing, name)
-            for status, moment in (("started", span.start), ("complete", span.end)):
-                key = (name, status)
-                if moment and key not in self.seen_phases:
-                    self.seen_phases.add(key)
-                    self.emit(EpisodeEvent(kind="episode_phase", step=trace.num_turns,
-                        details={"phase": name, "status": status,
-                                 "duration_seconds": max(0, span.end - span.start) if status == "complete" else None}))
-
-    def summary(self, trace, records, actions) -> EpisodeProfile:
-        framework = {}
-        if trace is not None:
-            for name in ("boot", "setup", "agent", "finalize", "scoring"):
-                span = getattr(trace.timing, name)
-                if span.start:
-                    framework[name] = max(0, (span.end or time()) - span.start)
+    def summary(self, trajectory, *, setup_seconds=0.0) -> EpisodeProfile:
         wall = perf_counter() - self.started
-        model = sum(record["duration"] for record in records)
-        tools = sum(action.duration_seconds for action in actions)
-        setup = framework.get("boot", 0) + framework.get("setup", 0)
-        finalize = framework.get("finalize", 0)
-        scoring = framework.get("scoring", 0)
-        return EpisodeProfile(wall_seconds=wall, setup_seconds=setup, model_seconds=model,
-            tools_seconds=tools, finalize_seconds=finalize, scoring_seconds=scoring,
-            other_seconds=max(0, wall - model - tools - setup - finalize - scoring), framework_seconds=framework)
+        model = sum(step.model_duration_seconds for step in trajectory)
+        tools = sum(action.duration_seconds for step in trajectory for action in step.actions)
+        return EpisodeProfile(wall_seconds=wall, setup_seconds=setup_seconds, model_seconds=model,
+            tools_seconds=tools, finalize_seconds=0, scoring_seconds=0,
+            other_seconds=max(0, wall - model - tools - setup_seconds))
 
 
 def safe_event_record(kind: str, data: dict, *, run_id: str | None = None) -> dict:

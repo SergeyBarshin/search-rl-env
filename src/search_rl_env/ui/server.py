@@ -238,7 +238,7 @@ def get_run(request) -> Run:
                 result = EpisodeResult.model_validate_json(path.read_text(encoding='utf-8'))
             except (OSError, ValueError):
                 raise web.HTTPNotFound() from None
-            hybrid = (result.native_trace or {}).get('task', {}).get('data', {}).get('sql_schema') is not None
+            hybrid = result.sql_enabled or (result.native_trace or {}).get('task', {}).get('data', {}).get('sql_schema') is not None
             saved_request = RunRequest(question=result.task.question,
                 mode='mock' if result.model_metadata.get('adapter') == 'mock' else 'api',
                 scenario='sql_rag' if hybrid else 'retrieval')

@@ -44,8 +44,37 @@ def test_html_report_escapes_data_and_shows_tools_environment_and_reference(tmp_
     assert '<script>bad()' not in text and '&lt;script&gt;' in text
     assert '<img src=x' not in text
     assert 'SELECT value FROM facts' in text and 'Real text' in text
-    assert 'PRIVATE_REFERENCE' in text and 'агент его не видел' in text
+    assert 'PRIVATE_REFERENCE' in text and 'Эталон для ручного разбора' in text
     assert 'нет данных' in text and 'CREATE TABLE facts' in text
     write_index([{'task_id':'real-question','question':'<script>bad()</script>',
                   'status':'finished','html':'abc.html'}],tmp_path/'index.html',{'protocol':'test'})
     assert '<script>bad()' not in (tmp_path/'index.html').read_text()
+
+
+def test_rebuild_report_uses_saved_episode_and_verdict_without_model(tmp_path):
+    import json
+
+    review = tmp_path / 'html'
+    review.mkdir()
+    episode = {'schema_version': '3', 'task_id': 'a', 'task': {'question': 'Saved question'},
+               'episode_id': 'first', 'stop_reason': 'finished', 'answer': ['Saved answer']}
+    manifest = {'episodes': [{'episode_id': 'first', 'task_id': 'a', 'status': 'finished',
+                              'question': 'Saved question', 'html': 'first.html'}],
+                'sources': {'task_ids': ['a', 'b']}}
+    (tmp_path / 'manifest.json').write_text(json.dumps(manifest))
+    (review / 'first.json').write_text(json.dumps(episode))
+    (review / 'first.environment.json').write_text('{}')
+    verdicts = tmp_path / 'evaluation' / 'verdicts'
+    verdicts.mkdir(parents=True)
+    (verdicts.parent / 'judge.json').write_text('{}')
+    (verdicts / 'first.json').write_text(json.dumps({
+        'episode_id': 'first', 'task_id': 'a', 'score': 1, 'judge_called': True,
+        'usage': {'total_tokens': 12}, 'duration_seconds': 0.1,
+    }))
+
+    assert pilot.rebuild_report(tmp_path) == 0
+    assert 'Saved answer' in (review / 'first.html').read_text()
+    assert 'Saved question' in (review / 'index.html').read_text()
+    summary = json.loads((verdicts.parent / 'summary.json').read_text())
+    assert summary['accuracy_bounds'] == [0.5, 1.0]
+    assert summary['judge_usage']['total_tokens'] == 12

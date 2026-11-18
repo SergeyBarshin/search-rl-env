@@ -97,5 +97,5 @@ def test_parallel_example_saves_results_and_summary(tmp_path):
     episodes = [json.loads(path.read_text()) for path in tmp_path.glob('rollout-*.json')]
     assert len({result['episode_id'] for result in episodes}) == 8
     assert all(result['answer'] == ['ORD-101', 'ORD-105'] for result in episodes)
-    assert all(len(result['native_trace']['calls']) == 3 for result in episodes)
+    assert all(len(result['trajectory']) == 3 for result in episodes)
     assert "Traceback" not in completed.stderr

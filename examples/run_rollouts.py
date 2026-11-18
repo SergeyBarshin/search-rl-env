@@ -8,6 +8,7 @@ import os
 import platform
 import statistics
 from contextlib import AsyncExitStack, aclosing
+from importlib.metadata import version
 from pathlib import Path
 from time import perf_counter
 
@@ -37,7 +38,6 @@ async def main():
     parser.add_argument('--scenario', choices=['retrieval', 'sql_rag'], default='sql_rag')
     parser.add_argument('--episodes', type=positive_int, default=32)
     parser.add_argument('--concurrency', type=positive_int, default=8)
-    parser.add_argument('--execution', choices=['in_process', 'subprocess'], default='in_process')
     parser.add_argument('--mock-latency-ms', type=float, default=0., help='Синтетическое ожидание каждого ответа мока.')
     parser.add_argument('--output', type=Path, default=Path('runs/parallel'))
     parser.add_argument('--no-save', action='store_true', help='Не сохранять эпизоды; сводка сохраняется всегда.')
@@ -88,8 +88,7 @@ async def main():
                 http_client=http,
             ))
         runner = await stack.enter_async_context(RolloutRunner(
-            model, search, config, concurrency=args.concurrency, sql=MockSql() if hybrid else None,
-            execution=args.execution))
+            model, search, config, concurrency=args.concurrency, sql=MockSql() if hybrid else None))
         initialized = perf_counter() - wall_started
         sampling_started = perf_counter()
         requests = (RolloutRequest(task.model_copy(update={'task_id': f'rollout-{index:06}'}),
@@ -115,8 +114,8 @@ async def main():
     wall = perf_counter() - wall_started
     summary = {
         'model': args.model, 'scenario': args.scenario, 'episodes': completed, 'concurrency': args.concurrency,
-        'execution': args.execution, 'mock_latency_ms': args.mock_latency_ms,
-        'model_id': model.metadata.get('model'), 'framework_version': '0.4.0',
+        'mock_latency_ms': args.mock_latency_ms,
+        'model_id': model.metadata.get('model'), 'framework_version': version('openai-agents'),
         'corpus_id': task.corpus_id, 'corpus_revision': task.corpus_revision,
         'python': platform.python_version(), 'platform': platform.platform(),
         'config': config.model_dump(), 'initialization_seconds': initialized,

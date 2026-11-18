@@ -79,7 +79,10 @@ def write_episode_html(result, environment, reference, destination):
            'SQL / search':f"{r.get('sql_calls',0)} / {r.get('search_calls',0)}",'Токены':r.get('usage',{}).get('total_tokens'),
            'Cost из usage API':number(r.get('usage',{}).get('cost'),' USD')}
     body+='<div class="facts">'+''.join('<div class="fact"><b>'+esc(k)+'</b>'+esc('нет данных' if v is None else v)+'</div>' for k,v in facts.items())+'</div>'
-    source='поиск по английской Википедии с архивом ревизий' if environment.get('search_backend')=='wikipedia' else 'поиск BM25 по реальным текстам KILT'
+    source = {
+        'wikipedia': 'поиск по английской Википедии с архивом ревизий',
+        'kilt_hybrid': 'локальный поиск BM25 + FAISS по снимку KILT',
+    }.get(environment.get('search_backend'), 'поиск BM25 по текстам KILT')
     body+='<section class="card"><h2>Среда, доступная агенту</h2><p>Настоящая SQLite '+esc(environment.get('db_id',''))+' и '+esc(source)+'. Постоянная память агента выключена.</p>'
     body+='<p class="warning">'+esc(environment.get('corpus_limitation',''))+'</p>'
     body+=details('Публичная схема SQLite', '<pre>'+esc(environment.get('sql_schema',''))+'</pre>')
@@ -101,8 +104,9 @@ def write_episode_html(result, environment, reference, destination):
     body+='<section class="card"><h2>Итог агента</h2><div class="answer">'+esc('\n'.join(r.get('answer') or ['Финальный ответ не получен.']))+'</div>'
     body+='<p>Выбранные источники: '+esc(', '.join(r.get('selected_document_ids',[])))+'</p>'
     if r.get('error'):body+=pretty(r['error'])
-    body+='<p class="muted">Содержательная правильность не оценена автоматически. Успешный finish подтверждает завершение, а не правильность ответа.</p></section>'
-    body+=details('Эталон для ручного разбора · агент его не видел', pretty(reference))
+    body+='</section>'
+    if reference is not None:
+        body+=details('Эталон для ручного разбора', pretty(reference))
     body+=details('Полный сохранённый контекст модели',pretty(r.get('history',[])))
     body+=details('Промпт и бюджеты',pretty(r.get('config',{})))
     body+='<p><a href="'+quote(destination.with_suffix('.json').name)+'">Исходный EpisodeResult JSON</a></p>'

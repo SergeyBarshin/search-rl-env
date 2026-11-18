@@ -8,7 +8,8 @@ from pydantic import ValidationError
 from search_rl_env.agent import run_episode, save_episode
 from search_rl_env.agent.mocks import MockModel, MockSearch
 from search_rl_env.contracts import AgentTask, EpisodeConfig, EpisodeResult, SearchHit
-from search_rl_env.contracts.types import ModelResponse, StopReason, Usage
+from search_rl_env.contracts.types import ModelResponse, RetrievalRoundConfig, StopReason, Usage
+from search_rl_env.evaluation.retrieval import score_retrieval
 
 
 @pytest.fixture
@@ -47,7 +48,86 @@ class ScriptedModel:
         return next(self.responses)
 
 
-async def test_complete_episode_and_native_trace_roundtrip(task, search, tmp_path):
+async def test_retrieval_round_only_carries_selected_evidence(task, search):
+    checkpoint = action("save_and_advance", {
+        "document_ids": ["doc-1"], "summary": "Срок перенесён.", "unresolved": ["Какая дата?"],
+        "next_goal": "Искать точную дату.",
+    }, call_id="save")
+    checkpoint.message["tool_calls"] += action("search", {"query": "too early"}, call_id="early").message["tool_calls"]
+    model = ScriptedModel([
+        action("search", {"query": "срок", "top_k": 2}),
+        checkpoint,
+        action("finish", {"document_ids": ["doc-2"]}, call_id="unknown"),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="finish"),
+    ])
+    events = []
+    config = EpisodeConfig(retrieval_rounds=RetrievalRoundConfig(max_rounds=2, max_turns=2))
+    result = await run_episode(task, model, search, config, on_event=events.append)
+
+    assert result.stop_reason == StopReason.FINISHED
+    assert result.selected_document_ids == ["doc-1"]
+    assert result.search_calls == 1
+    assert result.invalid_actions == 1
+    assert result.trajectory[1].actions[1].result["error"]["code"] == "round_advanced"
+    assert [step.retrieval_round for step in result.trajectory] == [1, 1, 2, 2]
+    assert any(event.kind == "retrieval_round_started" for event in events)
+    assert {item["function"]["name"] for item in model.requests[1]["tools"]} == {"save_and_advance", "finish"}
+    assert {item["function"]["name"] for item in model.requests[2]["tools"]} == {"search", "finish"}
+    messages = model.requests[2]["messages"]
+    assert [message["role"] for message in messages] == ["system", "user", "user"]
+    assert json.loads(messages[-1]["content"]) == {
+        "retrieval_round": 2,
+        "saved_evidence": [{"doc_id": "doc-1", "snippet": "Срок перенесён на ноябрь."}],
+        "summary": "Срок перенесён.", "unresolved": ["Какая дата?"], "next_goal": "Искать точную дату.",
+    }
+
+
+async def test_trust_recall_cuts_raw_chunk_ranking_before_document_dedup(task, search):
+    episode = await run_episode(task, MockModel(), search, EpisodeConfig())
+    episode.selected_document_ids = [f"101_{i}" for i in range(10)] + ["202_0"]
+    score = score_retrieval(episode, {"101", "202"}, "trust")
+    assert score["recall_at_10"] == 0.5
+
+
+async def test_bounded_retrieval_preserves_seed_hits_when_generation_is_truncated(task, search):
+    response = ModelResponse(message={"role": "assistant", "content": None},
+                             usage=Usage(prompt_tokens=4, completion_tokens=10, cost=0.0), finish_reason="length")
+    model = ScriptedModel([response])
+    result = await run_episode(task, model, search, EpisodeConfig(
+        retrieval_rounds=RetrievalRoundConfig(preserve_ranking=True),
+    ))
+
+    assert [item["query"] for item in search.calls] == [task.question]
+    assert [step.step for step in result.trajectory] == [0, 1]
+    assert result.trajectory[0].actions[0].name == "search"
+    assert [message["role"] for message in model.requests[0]["messages"]] == ["system", "user", "user"]
+    assert result.stop_reason == StopReason.MAX_OUTPUT_TOKENS
+    assert result.ranking_source == "retrieval_fallback"
+    assert result.selected_document_ids == ["doc-1", "doc-2"]
+    assert score_retrieval(result, {"doc-2"}, "fixture")["recall_at_10"] == 1.0
+
+
+async def test_bounded_retrieval_reserves_a_compact_finish_turn(task, search):
+    model = ScriptedModel([
+        action("search", {"query": "точная дата"}),
+        action("finish", {"document_ids": ["doc-2"]}, call_id="finish"),
+    ])
+    result = await run_episode(task, model, search, EpisodeConfig(
+        max_steps=2, max_snippet_chars=8, retrieval_rounds=RetrievalRoundConfig(preserve_ranking=True),
+    ))
+
+    assert len(model.requests) == 2
+    final = model.requests[-1]
+    assert [tool["function"]["name"] for tool in final["tools"]] == ["finish"]
+    assert [message["role"] for message in final["messages"]] == ["system", "user", "user"]
+    evidence = json.loads(final["messages"][-1]["content"])["evidence"]
+    assert [hit["doc_id"] for hit in evidence] == ["doc-1", "doc-2"]
+    assert all(len(hit["snippet"]) <= 8 for hit in evidence)
+    assert result.ranking_source == "model_plus_retrieval"
+    assert result.selected_document_ids == ["doc-2", "doc-1"]
+
+
+async def test_complete_episode_and_public_trace_roundtrip(task, search, tmp_path):
     result = await run_episode(task, MockModel(), search, EpisodeConfig())
     assert result.stop_reason == StopReason.FINISHED
     assert result.selected_document_ids == ["doc-1", "doc-2"]
@@ -57,11 +137,10 @@ async def test_complete_episode_and_native_trace_roundtrip(task, search, tmp_pat
     assert [step.actions[0].name for step in result.trajectory] == ["search", "finish"]
     assert search.calls[0] == {"query": task.question, "corpus_id": "demo", "corpus_revision": "v1", "limit": 10}
     assert [m["tool_call_id"] for m in result.history if m["role"] == "tool"] == ["mock-call-1", "mock-call-2"]
-    native = result.native_trace
-    assert native["verifiers"]["version"] == "0.4.0"
-    assert len(native["calls"]) == 2
-    assert native["stop_condition"] == "task_finished"
-    assert all(node["sampled"] == (node["message"]["role"] == "assistant") for node in native["nodes"])
+    assert result.schema_version == "4"
+    assert result.model_metadata["framework"] == "openai-agents"
+    assert result.native_trace is None
+    assert result.prompt_revision
     assert result.reward is None
     path = save_episode(result, tmp_path / "nested/episode.json")
     assert EpisodeResult.model_validate_json(path.read_text()) == result
@@ -92,6 +171,20 @@ async def test_step_limit_does_not_select_all_found_documents(task, search):
     assert result.truncated
     assert result.selected_document_ids == []
     assert len(result.trajectory) == 1
+
+
+async def test_last_turn_can_be_reserved_for_finish(task, search):
+    model = ScriptedModel([
+        action("search", {"query": "срок"}),
+        action("finish", {"document_ids": ["doc-1"]}, call_id="finish"),
+    ])
+    result = await run_episode(task, model, search, EpisodeConfig(max_steps=2, finish_on_last_step=True))
+
+    assert {item["function"]["name"] for item in model.requests[0]["tools"]} == {"search", "finish"}
+    assert [item["function"]["name"] for item in model.requests[1]["tools"]] == ["finish"]
+    assert model.requests[1]["messages"][-1]["content"].startswith("This is the final turn.")
+    assert result.stop_reason == StopReason.FINISHED
+    assert result.selected_document_ids == ["doc-1"]
 
 
 async def test_native_output_cap_is_checked_between_turns(task, search):
@@ -243,7 +336,7 @@ async def test_empty_response_can_recover_and_submit_real_tool_answer(task, sear
     assert len(result.trajectory) == 3
     assert result.usage.prompt_tokens == 15
     assert "No final answer has been submitted" in model.requests[1]['messages'][-1]['content']
-    assert len(result.native_trace['calls']) == 3
+    assert len(result.trajectory) == 3
 
 
 async def test_missing_finish_recovery_is_bounded(task, search):
@@ -363,7 +456,6 @@ async def test_cancellation_during_search_records_pending_action(task):
         await operation
     result = partial[0]
     assert result.error.code == 'interrupted'
-    assert result.native_trace['info']['episode']['error']['code'] == 'interrupted'
     assert result.search_calls == 1
     assert result.trajectory[0].actions[0].result['error']['code'] == 'interrupted'
     assert result.usage.completion_tokens == 1

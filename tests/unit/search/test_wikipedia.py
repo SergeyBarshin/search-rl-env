@@ -13,6 +13,7 @@ async def test_full_revision_results_are_ranked_archived_and_cached(tmp_path):
     def handler(request):
         calls.append(request)
         assert request.url.params['gsrsearch']=='Jacques Plante'
+        assert 'rvlimit' not in request.url.params
         return httpx.Response(200,json={'query':{'pages':[
             {'index':2,'pageid':20,'title':'Second','revisions':[{'revid':22,
                 'timestamp':'2026-01-01T00:00:00Z','slots':{'main':{'content':'Other'}}}]},

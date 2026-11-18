@@ -40,7 +40,8 @@ class WikipediaSearch:
         params = {'action': 'query', 'format': 'json', 'formatversion': 2,
                   'generator': 'search', 'gsrsearch': query, 'gsrnamespace': 0,
                   'gsrlimit': limit, 'prop': 'revisions', 'rvprop': 'ids|timestamp|content',
-                  'rvslots': 'main', 'rvlimit': 1, 'maxlag': 5}
+                  # При нескольких страницах API по умолчанию отдаёт по одной ревизии.
+                  'rvslots': 'main', 'maxlag': 5}
         key = hashlib.sha256(json.dumps(params, sort_keys=True).encode()).hexdigest()
         # Serialize requests across episodes and cache identical queries within this run.
         async with self._lock:

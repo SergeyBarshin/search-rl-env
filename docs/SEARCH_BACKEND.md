@@ -37,3 +37,9 @@ python -m pytest tests/unit/search -q
 
 Изолированные SQLite/FAISS и приёмка 1/40 описаны в
 [ISOLATED_ENVIRONMENTS.md](ISOLATED_ENVIRONMENTS.md).
+
+## Бэкенды текстового бенчмарка
+
+`Bm25Search` и `EmbeddingSearch` открывают готовый SQLite-снимок прямо в процессе раннера. `EmbeddingSearch` дополнительно загружает FAISS с векторами Jina и вызывает локальный OpenAI-compatible endpoint для эмбеддинга запроса. Jina и FAISS обслуживают плотный поиск, а лексический канал подключается в режиме `hybrid`.
+
+`ReferenceSearch` читает индекс отдельно запущенного публичного бенчмарка по контракту T-Search. Внешний `POST /search` принимает `query` и `top_k`, возвращает `result` с `doc_id` и `snippet` в порядке выдачи. Команда запуска требует манифест корпуса и ревизии поиска. При наличии заголовка `x-search-revision` клиент сверяет его с манифестом. [Команды и условия сравнения](EXPERIMENTS.md#закрытый-бенчмарк-текстового-поиска).

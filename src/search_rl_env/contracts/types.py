@@ -63,16 +63,27 @@ class SqlBackend(Protocol):
     async def query(self, query: str) -> SqlResult: ...
 
 
+class RetrievalRoundConfig(Contract):
+    max_rounds: int = Field(default=5, ge=1)
+    context_tokens: int = Field(default=32768, ge=128)
+    max_turns: int = Field(default=60, ge=1)
+    search_lock_ratio: float = Field(default=0.75, gt=0, lt=1)
+    preserve_ranking: bool = False
+    final_snippet_chars: int | None = Field(default=1000, ge=1)
+
+
 class EpisodeConfig(Contract):
     system_prompt: str | None = Field(default=None, min_length=1)
     max_finish_retries: int = Field(default=0, ge=0)
     rollout_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
     max_steps: int | None = Field(default=None, ge=1)
+    finish_on_last_step: bool = False
     max_output_tokens: int | None = Field(default=None, ge=1)
     max_tokens_per_step: int | None = Field(default=512, ge=1)
     search_limit: int = Field(default=10, ge=1)
     max_snippet_chars: int | None = Field(default=2000, ge=1)
     seed: int | None = None
+    retrieval_rounds: RetrievalRoundConfig | None = None
 
 
 class Usage(BaseModel):
@@ -150,8 +161,16 @@ class ModelError(RuntimeError):
     http_profile: HttpProfile | None = None
 
 
-class ModelTimeoutError(ModelError):
+class ModelTransportError(ModelError):
+    code = "model_transport_error"
+
+
+class ModelTimeoutError(ModelTransportError):
     code = "model_timeout"
+
+
+class ModelAuthenticationError(ModelError):
+    """HTTP 401 with a rejected credential."""
 
 
 class ModelContextError(ModelError):
@@ -195,6 +214,7 @@ class ToolExecution(Contract):
 
 class EpisodeStep(Contract):
     step: int
+    retrieval_round: int | None = Field(default=None, ge=1)
     request_max_output_tokens: int | None
     model_duration_seconds: float = Field(default=0, ge=0)
     usage: Usage = Field(default_factory=Usage)
@@ -209,7 +229,7 @@ class EpisodeStep(Contract):
 
 class EpisodeEvent(Contract):
     kind: Literal["model_started", "model_finished", "tool_started", "tool_finished",
-                  "episode_started", "episode_phase", "episode_finished", "model_progress"]
+                  "episode_started", "episode_phase", "episode_finished", "model_progress", "retrieval_round_started"]
     step: int
     details: dict[str, Any]
     episode_id: str | None = None
@@ -218,13 +238,14 @@ class EpisodeEvent(Contract):
 
 
 class EpisodeResult(Contract):
-    schema_version: Literal["2", "3"] = "3"
+    schema_version: Literal["2", "3", "4"] = "3"
     task_id: str
     episode_id: str
     task: AgentTask
     config: EpisodeConfig
     model_metadata: dict[str, Any]
     selected_document_ids: list[str]
+    ranking_source: Literal["model", "model_plus_retrieval", "retrieval_fallback"] | None = None
     stop_reason: StopReason
     truncated: bool
     history: list[dict[str, Any]]
@@ -237,6 +258,8 @@ class EpisodeResult(Contract):
     error: EpisodeError | None = None
     reward: float | None = None
     native_trace: dict[str, Any] | None = None
+    sql_enabled: bool = False
+    prompt_revision: str | None = None
     answer: list[str] | None = None
     sql_calls: int = 0
     profile: EpisodeProfile | None = None

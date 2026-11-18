@@ -1,10 +1,8 @@
 import asyncio
 import json
-import os
 from contextlib import aclosing
 
 import pytest
-import verifiers.v1 as vf
 
 from search_rl_env.agent import RolloutRequest, RolloutRunner
 from search_rl_env.agent.mocks import MockModel, MockSearch
@@ -38,20 +36,14 @@ async def test_bounded_parallelism_reuses_clients_and_keeps_episode_ids():
     async with runner:
         results = [result async for result in runner.iter_episodes(
             (RolloutRequest(task(i), reference_document_ids=['a']) for i in range(12)), on_event=events.append)]
-        assert len(runner.interception.clients) == 1
-        assert runner.interception.load == 0
-        assert runner.bridge.bridges == runner.bridge.traces == {}
-        assert not runner.http.closed
-        key_var = runner.bridge.key_var
-        assert key_var in os.environ
-    assert key_var not in os.environ
-    assert runner.http.closed
+        assert not runner._active and not runner._workers
+        assert not runner._client.is_closed()
+    assert runner._client.is_closed()
     assert 1 < peak <= 3
     assert len({result.episode_id for result in results}) == 12
     assert {result.task_id for result in results} == {str(i) for i in range(12)}
     assert all(result.reward == 1 and result.selected_document_ids == ['a'] for result in results)
     assert {event.episode_id for event in events} == {result.episode_id for result in results}
-    assert len({result.native_trace['agent']['config']['client']['base_url'] for result in results}) == 1
 
 
 async def test_results_are_delivered_before_slow_episode_and_batch_close_cancels_it():
@@ -74,8 +66,6 @@ async def test_results_are_delivered_before_slow_episode_and_batch_close_cancels
             assert first.task_id == 'fast'
             assert not cancelled.is_set()
         assert cancelled.is_set()
-        assert runner.interception.load == 0
-        assert runner.bridge.bridges == runner.bridge.traces == {}
         # Отмена batch не закрывает общий транспорт.
         assert (await runner.run(task('again'))).stop_reason == 'finished'
 
@@ -113,8 +103,6 @@ async def test_runner_cancels_owned_runs_before_closing_transport():
         await asyncio.wait_for(started.wait(), 5)
     assert operation.cancelled()
     assert partials[0].error.code == 'interrupted'
-    assert runner.bridge.bridges == runner.bridge.traces == {}
-    assert runner.interception.load == 0
 
 
 async def test_bad_source_cancels_siblings_and_propagates_error():
@@ -127,7 +115,6 @@ async def test_bad_source_cancels_siblings_and_propagates_error():
             async for _ in runner.iter_episodes(broken()):
                 pass
         assert not runner._active
-        assert runner.bridge.bridges == runner.bridge.traces == {}
         assert (await runner.run(task('after'))).stop_reason == 'finished'
 
 
@@ -137,7 +124,7 @@ def test_invalid_concurrency(concurrency):
         RolloutRunner(concurrency=concurrency)
 
 
-async def test_native_state_isolated_between_searches_failures_and_finish():
+async def test_episode_state_isolated_between_searches_failures_and_finish():
     class PerTaskSearch:
         async def search(self, query, **kwargs):
             await asyncio.sleep(.001)
@@ -156,40 +143,14 @@ async def test_native_state_isolated_between_searches_failures_and_finish():
     assert 'secret-backend-value' not in ''.join(result.model_dump_json() for result in results.values())
 
 
-async def test_subprocess_mcp_fallback_keeps_same_behavior():
-    results = []
-    for execution in ['in_process', 'subprocess']:
-        async with RolloutRunner(MockModel(), search(), concurrency=1, execution=execution) as runner:
-            results.append(await runner.run(task('same'), reference_document_ids=['a']))
-    first, second = results
+async def test_single_and_batch_keep_same_behavior():
+    async with RolloutRunner(MockModel(), search(), concurrency=2) as runner:
+        first = await runner.run(task('same'), reference_document_ids=['a'])
+        async with aclosing(runner.iter_episodes([RolloutRequest(task('same'), reference_document_ids=['a'])])) as results:
+            second = await anext(results)
     assert first.stop_reason == second.stop_reason == 'finished'
     assert first.selected_document_ids == second.selected_document_ids == ['a']
     assert first.usage == second.usage
     assert first.reward == second.reward == 1
     assert [action.result for step in first.trajectory for action in step.actions] == [
         action.result for step in second.trajectory for action in step.actions]
-
-
-async def test_native_tool_gate_prevents_execution_and_keeps_observation(monkeypatch):
-    import search_rl_env.agent.loop as loop
-    from search_rl_env.environment.taskset import SearchTask
-
-    class GuardedTask(SearchTask):
-        @vf.intercept
-        async def deny_search(self, request: vf.Request) -> vf.Request:
-            message = request.messages[-1]
-            if message.role == 'tool' and message.name == 'search':
-                message.content = json.dumps({'ok': False, 'error': {'code': 'test_gate', 'message': 'Denied by test.'}})
-            return request
-
-    monkeypatch.setattr(loop, 'SearchTask', GuardedTask)
-    backend = search()
-    async with RolloutRunner(MockModel(), backend) as runner:
-        result = await runner.run(task('gated'), reference_document_ids=['a'])
-    assert not backend.calls
-    assert result.stop_reason == 'finished'
-    assert result.reward == 0
-    assert result.invalid_actions == 1
-    assert result.trajectory[0].actions[0].result['ok'] is False
-    assert result.native_trace['request_rewrites']
-    assert 'test_gate' in next(message['content'] for message in result.history if message['role'] == 'tool')

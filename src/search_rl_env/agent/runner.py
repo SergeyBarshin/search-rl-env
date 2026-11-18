@@ -1,20 +1,18 @@
-"""Ограниченный пул rollout с переиспользованием транспорта и native interception."""
+"""Ограниченный пул rollout с переиспользованием транспорта SDK."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterable, AsyncIterator, Iterable
-from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from typing import Literal
 
-import aiohttp
+import httpx
+from openai import AsyncOpenAI
 
 from search_rl_env.contracts.types import AgentTask, ChatModel, EpisodeConfig, EpisodeResult, SearchBackend, SqlBackend
 
-from .bridge import BridgeServer
-from .harness import harness_http
-from .interception import HarnessInterception
+from .sdk import dispatch_completion, run_sdk_episode
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,35 +33,28 @@ class RolloutRunner:
 
     def __init__(self, model: ChatModel | None = None, search: SearchBackend | None = None,
                  config: EpisodeConfig | None = None, *, sql: SqlBackend | None = None, concurrency: int = 8,
-                 execution: Literal['in_process', 'subprocess'] = 'in_process'):
+                 execution: Literal["in_process"] = "in_process"):
         if isinstance(concurrency, bool) or not isinstance(concurrency, int) or concurrency < 1:
             raise ValueError('concurrency должен быть положительным целым числом.')
-        if execution not in {'in_process', 'subprocess'}:
-            raise ValueError('execution должен быть in_process или subprocess.')
+        if execution != "in_process":
+            raise ValueError("Agents SDK поддерживает execution='in_process'.")
         self.model, self.search, self.sql = model, search, sql
         self.config = config or EpisodeConfig()
         self.concurrency = concurrency
-        self.execution = execution
         self._gate = asyncio.Semaphore(concurrency)
         self._active, self._workers = set(), set()
-        self._stack = None
+        self._client = None
         self._closed = False
 
     async def __aenter__(self):
-        if self._stack is not None or self._closed:
+        if self._client is not None or self._closed:
             raise RuntimeError('Runner уже запущен или закрыт.')
-        self._stack = AsyncExitStack()
-        try:
-            self.bridge = await self._stack.enter_async_context(BridgeServer())
-            self.interception = await self._stack.enter_async_context(HarnessInterception(self.bridge))
-            self.http = await self._stack.enter_async_context(aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=None, sock_connect=5),
-                connector=aiohttp.TCPConnector(limit=self.concurrency * 2, keepalive_timeout=300),
-            ))
-        except BaseException:
-            await self._stack.aclose()
-            self._closed = True
-            raise
+        self._client = AsyncOpenAI(
+            api_key="local-sdk-adapter",
+            base_url="https://agent-transport.invalid/v1",
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(dispatch_completion)),
+            max_retries=0,
+        )
         return self
 
     async def __aexit__(self, *exc):
@@ -73,28 +64,23 @@ class RolloutRunner:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
-        await self._stack.aclose()
+        await self._client.close()
 
     async def run(self, task: AgentTask, model=None, search=None, config=None, *, sql=None,
                   on_event=None, on_interrupted=None, reference_document_ids=None, reference_answer=None) -> EpisodeResult:
-        if self._stack is None or self._closed:
+        if self._client is None or self._closed:
             raise RuntimeError('Используйте async with RolloutRunner(...).')
         model = self.model if model is None else model
         search = self.search if search is None else search
         if model is None or search is None:
             raise ValueError('Нужны model и search в runner или run().')
-        from .loop import _run_episode
         operation = asyncio.current_task()
         self._active.add(operation)
         try:
             async with self._gate:
-                token = harness_http.set(self.http)
-                try:
-                    return await _run_episode(task, model, search, config or self.config, resources=self,
-                        sql=self.sql if sql is None else sql, on_event=on_event, on_interrupted=on_interrupted,
-                        reference_document_ids=reference_document_ids, reference_answer=reference_answer)
-                finally:
-                    harness_http.reset(token)
+                return await run_sdk_episode(task, model, search, config or self.config, client=self._client,
+                    sql=self.sql if sql is None else sql, on_event=on_event, on_interrupted=on_interrupted,
+                    reference_document_ids=reference_document_ids, reference_answer=reference_answer)
         finally:
             self._active.discard(operation)
 
@@ -105,7 +91,7 @@ class RolloutRunner:
         Закрывайте iterator через aclose()/contextlib.aclosing при досрочном выходе.
         Это отменяет незавершённые работы этого batch, не затрагивая другие batch.
         """
-        if self._stack is None or self._closed:
+        if self._client is None or self._closed:
             raise RuntimeError('Используйте async with RolloutRunner(...).')
         asynchronous = isinstance(requests, AsyncIterable)
         source = aiter(requests) if asynchronous else iter(requests)

@@ -3,7 +3,7 @@ set -eu
 
 mkdir -p /artifacts
 python -m pip freeze > /artifacts/packages.txt
-python -c 'import faiss, psutil, sqlite3; print("FAISS", faiss.__version__, "SQLite", sqlite3.sqlite_version)'
+python -c 'import faiss, psutil, sqlite3; from importlib.util import find_spec; from importlib.metadata import version; assert find_spec("verifiers") is None; print("Agents SDK", version("openai-agents")); print("FAISS", faiss.__version__, "SQLite", sqlite3.sqlite_version)'
 
 test_status=0
 python -m pytest -q --junitxml=/artifacts/pytest.xml > /artifacts/pytest.log 2>&1 || test_status=$?

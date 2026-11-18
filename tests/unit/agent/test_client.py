@@ -84,6 +84,57 @@ async def test_total_request_deadline_stops_a_stalled_transport():
     assert result.model_metadata["timeout_seconds"] == 0.02
 
 
+@pytest.mark.parametrize("provider", [None, "parasail/fp8"])
+async def test_openrouter_price_filter_keeps_oauth_authorization(provider):
+    def handler(request):
+        assert request.headers["authorization"] == "OAuth test-token"
+        body = json.loads(request.content)
+        expected = {"require_parameters": True, "max_price": {"prompt": 0.1, "completion": 1.0}}
+        if provider is not None:
+            expected.update(only=[provider], allow_fallbacks=False)
+        assert body["provider"] == expected
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "done"}, "finish_reason": "stop"}],
+            "usage": {"cost": 0.001},
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        model = ChatCompletionsClient(
+            api_key="test-token", endpoint="https://proxy.example.invalid/raw/openrouter/v1/chat/completions",
+            model="qwen/test", auth_scheme="OAuth", http_client=http,
+            max_price_usd_per_million=(0.1, 1.0),
+            openrouter_provider=provider,
+        )
+        result = await model.complete([{"role": "user", "content": "test"}], tools=[],
+                                      max_output_tokens=32, seed=None)
+    assert result.usage.cost == 0.001
+
+
+@pytest.mark.parametrize(("enabled", "effort", "expected_reasoning"), [
+    (False, None, {"enabled": False}),
+    (True, "low", {"enabled": True, "effort": "low"}),
+])
+async def test_bounded_openrouter_request_sets_reasoning_and_forces_the_final_tool(enabled, effort, expected_reasoning):
+    def handler(request):
+        body = json.loads(request.content)
+        assert body["reasoning"] == expected_reasoning
+        assert body["tool_choice"] == {"type": "function", "function": {"name": "finish"}}
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "done"}}],
+            "usage": {"cost": 0.0},
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        model = ChatCompletionsClient(
+            api_key="test-token", endpoint="https://proxy.example.invalid/v1", model="qwen/test",
+            http_client=http, reasoning_enabled=enabled, reasoning_effort=effort, force_final_tool=True,
+        )
+        assert model.metadata.get("reasoning_effort") == effort
+        await model.complete([{"role": "user", "content": "test"}],
+                             tools=[{"type": "function", "function": {"name": "finish"}}],
+                             max_output_tokens=512, seed=42)
+
+
 @pytest.mark.parametrize("seconds", [0, -1, float("inf"), float("nan")])
 def test_request_timeout_must_be_positive_and_finite(seconds):
     with pytest.raises(ValueError, match="timeout_seconds"):
@@ -132,3 +183,44 @@ async def test_configured_http_status_is_preserved_in_episode_error():
     assert "HTTP 401" in result.error.message
     assert "secret-body" not in result.model_dump_json()
     assert "fake-test-key" not in result.model_dump_json()
+
+
+async def test_sdk_hybrid_protocol_finishes_in_three_requests():
+    from search_rl_env.agent.mocks import MockSqlRagModel
+    from search_rl_env.environment.demo import HYBRID_HITS, HYBRID_REFERENCE, hybrid_task
+    from search_rl_env.environment.sql import MockSql
+
+    task = hybrid_task()
+    search = MockSearch(HYBRID_HITS, corpus_id=task.corpus_id, corpus_revision=task.corpus_revision)
+    scripted = MockSqlRagModel()
+    requests = []
+
+    async def handler(request):
+        assert request.headers["authorization"] == "OAuth sdk-fixture"
+        data = json.loads(request.content)
+        requests.append(data)
+        assert {tool["function"]["name"] for tool in data["tools"]} == {"search", "sql", "finish"}
+        assert data["seed"] == 42
+        assert data["stream"] is False
+        expected_ids = [f"hybrid-call-{i}" for i in range(1, len(requests))]
+        assert [m["tool_call_id"] for m in data["messages"] if m["role"] == "tool"] == expected_ids
+        reply = await scripted.complete(data["messages"], tools=data["tools"],
+                                        max_output_tokens=data["max_tokens"], seed=data["seed"])
+        return httpx.Response(200, json={
+            "id": f"response-{len(requests)}", "model": "test-hybrid", "provider": "local",
+            "choices": [{"message": reply.message, "finish_reason": reply.finish_reason}],
+            "usage": reply.usage.model_dump(),
+        })
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = ChatCompletionsClient(api_key="sdk-fixture", model="test-hybrid", auth_scheme="OAuth",
+                                       endpoint="https://model.example.invalid/v1/chat/completions", http_client=http)
+        result = await run_episode(task, client, search, EpisodeConfig(seed=42), sql=MockSql())
+
+    assert len(requests) == 3
+    assert result.answer == HYBRID_REFERENCE
+    assert result.selected_document_ids == ["policy-001"]
+    assert result.usage.total_tokens == 3
+    assert [step.actions[0].name for step in result.trajectory] == ["search", "sql", "finish"]
+    assert result.model_metadata["framework"] == "openai-agents"
+    assert "sdk-fixture" not in result.model_dump_json()

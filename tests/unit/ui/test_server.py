@@ -59,7 +59,7 @@ async def test_page_assets_and_settings_do_not_expose_credentials(ui, monkeypatc
         assert len(await response.read()) > 100
 
 
-async def test_real_mock_episode_streams_and_saves_native_trace(ui):
+async def test_real_mock_episode_streams_and_saves_public_trace(ui):
     run_id = await start(ui)
     events = await read_events(ui, run_id)
     assert [event["seq"] for event in events] == list(range(1, len(events) + 1))
@@ -71,7 +71,8 @@ async def test_real_mock_episode_streams_and_saves_native_trace(ui):
     assert result["stop_reason"] == "finished"
     assert result["task"]["question"] == "Какой новый срок проекта?"
     assert result["selected_document_ids"] == ["doc-001", "doc-002"]
-    assert result["native_trace"]["verifiers"]["version"] == "0.4.0"
+    assert result["model_metadata"]["framework"] == "openai-agents"
+    assert result["native_trace"] is None
     assert result['profile']['setup_seconds'] > 0
     assert result['profile']['wall_seconds'] == result['duration_seconds']
     assert Path(complete["data"]["saved_to"]).is_file()
@@ -199,7 +200,7 @@ async def test_hybrid_scenario_returns_sql_rows_answer_and_sources(ui):
     run_id = await start(ui, question=scenario['question'], scenario='sql_rag')
     events = await read_events(ui, run_id)
     result = events[-1]['data']['result']
-    assert result['schema_version'] == '3'
+    assert result['schema_version'] == '4'
     assert result['answer'] == ['ORD-101', 'ORD-105']
     assert result['selected_document_ids'] == ['policy-001']
     assert result['sql_calls'] == 1

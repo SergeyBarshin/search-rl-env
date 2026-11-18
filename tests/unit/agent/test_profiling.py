@@ -176,5 +176,5 @@ async def test_parallel_episodes_share_client_but_not_profiles_or_tool_state():
         assert result.profile.model_seconds > 0
         assert result.profile.model_seconds < result.profile.wall_seconds
         assert all(event.episode_id == result.episode_id for event in events[name])
-        assert result.native_trace['info']['profile'] == result.profile.model_dump(mode='json')
+        assert result.native_trace is None
         assert 'fake-key' not in result.model_dump_json()
